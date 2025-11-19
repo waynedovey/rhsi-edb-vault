@@ -1,0 +1,11 @@
+apiVersion: skupper.io/v2alpha1
+kind: Listener
+metadata:
+  name: postgres-primary
+  namespace: rhsi
+spec:
+  # Matches the routingKey used by the Connector on the primary site
+  routingKey: postgres
+  # Local service that will be created on the standby cluster
+  host: postgres-primary
+  port: 5432
