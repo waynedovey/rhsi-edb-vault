@@ -449,3 +449,10 @@ or delete them from the clusters as appropriate.
 * Add NetworkPolicies around the `rhsi` namespace.
 * Use more advanced RHSI constructs (AccessGrant, AccessToken) once you are
   comfortable with the basics.
+
+
+## Prerequisites
+
+- Red Hat Service Interconnect (RHSI) operator installed on both primary and standby clusters.
+  - Either install from OperatorHub in the console, **or**
+  - Apply the manifests in `operators/rhsi-operator/install-rhsi-operator.yaml` on each cluster to install the Skupper/RHSI operator and its CRDs (`skupper.io/Site`, `skupper.io/Connector`, etc.).
