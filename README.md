@@ -178,13 +178,6 @@ generator uses.
 ---
 
 ## 6. Create Placements on the hub
-> **Quick apply (hub cluster):** To create placements and ApplicationSets in one go, run:
->
-> ```sh
-> oc apply -f hub/
-> ```
->
-> The commands below show how to apply the individual files if you prefer.
 
 These determine which clusters get the primary vs standby manifests.
 
