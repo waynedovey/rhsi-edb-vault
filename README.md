@@ -449,14 +449,3 @@ or delete them from the clusters as appropriate.
 * Add NetworkPolicies around the `rhsi` namespace.
 * Use more advanced RHSI constructs (AccessGrant, AccessToken) once you are
   comfortable with the basics.
-
-## Installing the Red Hat Service Interconnect operator via Argo CD
-
-This repo now includes `hub/05-rhsi-operator.yaml`, which installs the **Red Hat Service Interconnect**
-Operator (`red-hat-service-interconnect`) in the `openshift-operators` namespace using an
-`OperatorGroup` + `Subscription`.
-
-If you are using Argo CD on the hub, make sure your Argo CD `Application` (or `ApplicationSet`) that
-targets the `hub/` directory has permissions to sync into cluster‑scoped and `openshift-*` namespaces.
-Once that application is synced, the RHSI operator and its CRDs (`skupper.io/Site`, `skupper.io/Connector`, etc.)
-will be available on the managed clusters where the operator installs.
