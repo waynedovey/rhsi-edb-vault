@@ -5,7 +5,7 @@ metadata:
   namespace: openshift-operators
 spec:
   channel: stable-2
-  installPlanApproval: Automatic
   name: skupper-operator
   source: redhat-operators
   sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic

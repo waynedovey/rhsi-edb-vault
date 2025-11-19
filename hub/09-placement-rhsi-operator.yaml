@@ -1,8 +1,8 @@
 apiVersion: cluster.open-cluster-management.io/v1beta1
 kind: Placement
 metadata:
-  name: rhsi-sites
-  namespace: openshift-gitops
+  name: rhsi-operator
+  namespace: open-cluster-management
 spec:
   predicates:
     - requiredClusterSelector:
