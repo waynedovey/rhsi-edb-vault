@@ -5,12 +5,13 @@ metadata:
   namespace: openshift-gitops
 spec:
   generators:
-  - clusterDecisionResource:
-      configMapRef: acm-placement
-      labelSelector:
-        matchLabels:
-          cluster.open-cluster-management.io/placement: rhsi-primary
-      requeueAfterSeconds: 60
+    - clusterDecisionResource:
+        # Provided by the ACM + GitOps integration
+        configMapRef: acm-placement
+        labelSelector:
+          matchLabels:
+            cluster.open-cluster-management.io/placement: rhsi-primary
+        requeueAfterSeconds: 60
   template:
     metadata:
       name: rhsi-primary-{{name}}
@@ -22,11 +23,11 @@ spec:
         path: rhsi/primary
       destination:
         namespace: rhsi
+        # Filled automatically from ACM placement decisions
         server: "{{server}}"
       syncPolicy:
         automated:
           prune: true
           selfHeal: true
         syncOptions:
-        - CreateNamespace=true
-        - ApplyOutOfSyncOnly=true
+          - CreateNamespace=true
