@@ -1,54 +1,28 @@
-# Red Hat Service Interconnect between site-a and site-b (GitOps with RHACM + Argo CD)
+# rhsi-edb-vault
 
-This README describes a **pragmatic GitOps pattern** to run Red Hat Service Interconnect (RHSI, Skupper v2)
-between two OpenShift clusters and use it to replicate a PostgreSQL database between sites.
+GitOps-ready example for:
 
-Clusters:
+- **Red Hat Service Interconnect (RHSI)** between two OpenShift clusters (`site-a`, `site-b`)
+- A simple **PostgreSQL primary/standby** replication demo using RHSI
+- (Optional) Integration point for Vault / EDB to be added later
 
-- **site-a** – `https://console-openshift-console.apps.site-a.sandbox2745.opentlc.com/` (AWS `ap-northeast-1`)
-- **site-b** – `https://console-openshift-console.apps.site-b.sandbox2745.opentlc.com/` (AWS `ap-northeast-2`)
+The repo is designed to be driven by **Argo CD** (OpenShift GitOps) on a **hub** cluster that is
+managing `site-a` and `site-b` via **RHACM**.
 
-RHSI is installed on both clusters and managed via **Argo CD** (OpenShift GitOps) on the hub, which itself is
-managed by **RHACM**.
+Clusters are treated generically as:
 
-The guide focuses on:
+- **site-a** – OpenShift cluster in AWS `ap-northeast-1`
+- **site-b** – OpenShift cluster in AWS `ap-northeast-2`
 
-1. Git layout and Argo CD setup (assumed on a hub / RHACM cluster).
-2. Declarative RHSI **Sites** on site-a and site-b.
-3. A **GitOps‑friendly way to handle the “token”/link**:  
-   use `skupper link generate` once, then store the resulting TLS material as a **sealed secret** in Git.
-4. An example PostgreSQL primary on site-a and standby on site-b using RHSI to carry the replication traffic.
-
-> ⚠️ **Note:** This is primarily a lab / PoC pattern. For production you’d usually add:
-> - Policy + RBAC for Skupper,  
-> - Stronger secret management (Vault / External Secrets / SOPS / Sealed Secrets),  
-> - Real HA PostgreSQL (CloudNativePG, Crunchy, Postgres-HA, etc.).
+> This is a _lab / PoC_ setup. For production, harden secrets, HA Postgres, and RHSI policies.
 
 ---
 
-## 1. Prerequisites
-
-- Two OpenShift clusters (site-a, site-b) reachable from your hub cluster.
-- RHACM installed on the hub and both clusters imported as `ManagedCluster` resources.
-- OpenShift GitOps (Argo CD) installed on the hub (usually in `openshift-gitops`).
-- RHSI entitlement & access to the **Red Hat Service Interconnect Operator** on both clusters.
-- `oc` and `kubectl` configured for hub, site-a, and site-b.
-- `skupper` CLI installed (on your admin machine or bastion).
-- (Recommended) **Bitnami Sealed Secrets** installed on both clusters if you want to keep link TLS in Git.
-
-We’ll use these namespaces:
-
-- `rhsi` – RHSI controller & site resources.
-- `db`   – Application namespace containing PostgreSQL deployments.
-
----
-
-## 2. Git layout
-
-Example Git repo structure:
+## 1. Repo layout
 
 ```text
-gitops-root/
+rhsi-edb-vault/
+├── README.md
 └── rhsi/
     ├── site-a/
     │   ├── namespace-rhsi.yaml
@@ -56,35 +30,39 @@ gitops-root/
     │   ├── postgres-connector.yaml
     │   └── db-primary/
     │       ├── namespace-db.yaml
+    │       ├── pg-primary-auth-secret.yaml
     │       ├── pg-primary-deploy.yaml
     │       └── pg-primary-svc.yaml
     └── site-b/
         ├── namespace-rhsi.yaml
         ├── site.yaml
-        ├── link-from-site-b.yaml      # Link resource pointing to site-a
-        ├── link-tls-sealedsecret.yaml # SealedSecret with TLS keys for the link
+        ├── link-from-site-b.yaml
+        ├── link-tls-sealedsecret.yaml
         ├── postgres-listener.yaml
         └── db-standby/
             ├── namespace-db.yaml
+            ├── pg-standby-auth-secret.yaml
             ├── pg-standby-deploy.yaml
             └── pg-standby-svc.yaml
 ```
 
-You can obviously embed this into your existing repo layout – paths are examples.
+You can host this repo on GitHub, e.g.:
+
+```yaml
+repoURL: https://github.com/waynedovey/rhsi-edb-vault.git
+```
+
+and point Argo CD at the `rhsi/site-a` and `rhsi/site-b` paths.
 
 ---
 
-## 3. RHACM + Argo CD integration (high level)
+## 2. RHACM + Argo CD integration (high level)
 
-This guide assumes:
+1. Import `site-a` and `site-b` as `ManagedCluster` resources in RHACM on the hub.
+2. Configure OpenShift GitOps (Argo CD) as the GitOps engine for RHACM (one `GitOpsCluster` per managed cluster).
+3. Ensure Argo sees the managed clusters as destinations with names `site-a` and `site-b`.
 
-- RHACM imports **site-a** and **site-b** as managed clusters.
-- OpenShift GitOps is configured as the GitOps engine for RHACM.  
-  (Typically via a `GitOpsCluster` per managed cluster.)
-
-Once the integration is done, Argo CD sees both clusters as destinations with names like `site-a` and `site-b`.
-
-Example Argo CD `Application` (on the hub) for **site-a**:
+Example Argo CD `Application` for **site-a** (applied on the hub in `openshift-gitops`):
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -95,11 +73,11 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/YOUR_ORG/YOUR_REPO.git
+    repoURL: https://github.com/waynedovey/rhsi-edb-vault.git
     targetRevision: main
     path: rhsi/site-a
   destination:
-    name: site-a              # Must match the Argo cluster name from RHACM integration
+    name: site-a              # Must match the Argo cluster name from RHACM
     namespace: rhsi
   syncPolicy:
     automated:
@@ -109,7 +87,7 @@ spec:
       - CreateNamespace=true
 ```
 
-And similarly for **site-b**:
+And for **site-b**:
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -120,7 +98,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/YOUR_ORG/YOUR_REPO.git
+    repoURL: https://github.com/waynedovey/rhsi-edb-vault.git
     targetRevision: main
     path: rhsi/site-b
   destination:
@@ -134,13 +112,18 @@ spec:
       - CreateNamespace=true
 ```
 
-Apply those on the **hub** cluster in `openshift-gitops` and Argo will manage both sites.
-
 ---
 
-## 4. Install Red Hat Service Interconnect via GitOps
+## 3. RHSI installation (operator + Site CRs)
 
-### 4.1 Namespace manifest (both sites)
+### 3.1 Install RHSI Operator (one-time per cluster)
+
+Install the **Red Hat Service Interconnect** operator into the `rhsi` namespace on both clusters
+(e.g. from OperatorHub) using the appropriate channel (`stable`, `stable-1.x`, etc).
+
+You can GitOps the operator as well (Subscription + OperatorGroup), but that’s outside this basic repo.
+
+### 3.2 Namespace and Site CRs (in this repo)
 
 `rhsi/site-a/namespace-rhsi.yaml`:
 
@@ -160,26 +143,6 @@ metadata:
   name: rhsi
 ```
 
-### 4.2 Install RHSI Operator (one time per cluster)
-
-For simplicity, **install the Red Hat Service Interconnect Operator manually** from OperatorHub
-into the `rhsi` namespace on each cluster (site-a, site-b), using the `stable` / `stable-1.8` / `stable-2`
-channel as appropriate.
-
-If you prefer GitOps for the operator itself, you can add a Subscription and OperatorGroup
-to each `rhsi/site-*/` tree – just adjust the `spec.name` and `spec.channel` to match your catalog.
-
-Once the operator is installed:
-
-- Operator namespace: `rhsi`
-- It watches Skupper / RHSI resources cluster-wide (or at least in selected namespaces – check the operator’s config).
-
----
-
-## 5. Declarative RHSI Site definitions
-
-### 5.1 site-a Site CR
-
 `rhsi/site-a/site.yaml`:
 
 ```yaml
@@ -193,8 +156,6 @@ spec:
   linkAccess: default
 ```
 
-### 5.2 site-b Site CR
-
 `rhsi/site-b/site.yaml`:
 
 ```yaml
@@ -206,175 +167,80 @@ metadata:
 spec: {}
 ```
 
-Commit and push these manifests; let Argo sync them to both clusters.
-
-To verify (from your laptop):
+Once Argo syncs these, confirm:
 
 ```bash
-# On site-a
 oc --context=site-a -n rhsi get site
-
-# On site-b
 oc --context=site-b -n rhsi get site
 ```
 
-Wait until `STATUS` shows `Ready` (or `OK` depending on CLI output).
+Both Sites should show as **Ready/OK**.
 
 ---
 
-## 6. GitOps-friendly linking using `skupper link generate` + sealed secrets
+## 4. GitOps-friendly link setup (replacing tokens)
 
-### 6.1 Why not just use tokens?
+RHSI/Skupper supports token-based linking, but tokens contain secrets and aren’t ideal to store in Git.
 
-RHSI/Skupper supports **token-based** linking (`skupper token issue/redeem`) and **link resource**–based
-linking (`skupper link generate`). Tokens and links both carry **secret** information and must
-not be stored in plain Git.
+Instead we:
 
-For GitOps, the most practical pattern is:
+1. Use `skupper link generate` on **site-a** (`rhsi` namespace).
+2. Split the resulting YAML into a `Link` resource and a TLS `Secret`.
+3. Convert the TLS `Secret` into a **SealedSecret** (or similar encrypted secret).
+4. Commit the `Link` + `SealedSecret` under `rhsi/site-b/`.
+5. Argo on site-b applies them and brings the link up.
 
-1. Use `skupper link generate` on **site-a** to generate:
-   - A `Link` resource (non-secret metadata),
-   - A TLS `Secret` (private key + cert).
-2. Convert the **Secret** into a **SealedSecret** (or SOPS-encrypted Secret).
-3. Store both the `Link` resource and the encrypted Secret in Git under `rhsi/site-b/`.
-4. Argo on **site-b** applies them and the site-to-site link comes up.
+### 4.1 Generate the link on site-a
 
-This is effectively automating the “token” via a one-time bootstrap with `skupper`.
-
-### 6.2 Generate link YAML on site-a
-
-1. Ensure the `Site` on site-a is **Ready**.
-2. From your admin machine:
+From an admin machine with `skupper` CLI:
 
 ```bash
-# Use site-a context and rhsi namespace
-oc --context=site-a -n rhsi whoami
+# use site-a context
 skupper --context site-a --namespace rhsi link generate > link-to-site-b.yaml
 ```
 
-The output file will look like this (simplified):
+The file will contain a `Link` + `Secret` (TLS). Treat this file as **sensitive**.
 
-```yaml
-apiVersion: skupper.io/v2alpha1
-kind: Link
-metadata:
-  name: site-b-link
-spec:
-  endpoints:
-    - group: skupper-router-1
-      host: 10.97.161.185
-      name: inter-router
-      port: "55671"
-    - group: skupper-router-1
-      host: 10.97.161.185
-      name: edge
-      port: "45671"
-  tlsCredentials: site-b-link-tls
----
-apiVersion: v1
-kind: Secret
-type: kubernetes.io/tls
-metadata:
-  name: site-b-link-tls
-data:
-  ca.crt: ...
-  tls.crt: ...
-  tls.key: ...
-```
+### 4.2 Split and seal the TLS Secret
 
-> ⚠️ Treat this file as sensitive – it contains a private key.
-
-### 6.3 Split into Link + Secret and add to Git
-
-Create two files under `rhsi/site-b/`:
-
-`rhsi/site-b/link-from-site-b.yaml` (Link resource only):
-
-```yaml
-apiVersion: skupper.io/v2alpha1
-kind: Link
-metadata:
-  name: site-b-link
-  namespace: rhsi
-spec:
-  endpoints:
-    - group: skupper-router-1
-      host: 10.97.161.185
-      name: inter-router
-      port: "55671"
-    - group: skupper-router-1
-      host: 10.97.161.185
-      name: edge
-      port: "45671"
-  tlsCredentials: site-b-link-tls
-```
-
-`rhsi/site-b/link-tls-secret-plain.yaml` (temporary, **not** committed):
-
-```yaml
-apiVersion: v1
-kind: Secret
-type: kubernetes.io/tls
-metadata:
-  name: site-b-link-tls
-  namespace: rhsi
-data:
-  ca.crt: ...
-  tls.crt: ...
-  tls.key: ...
-```
-
-Now convert the Secret to a SealedSecret (or your preferred encrypted secret format).
-
-Example using Bitnami Sealed Secrets (with site-b cluster):
+1. Copy the `Link` part into `rhsi/site-b/link-from-site-b.yaml`.
+2. Copy the TLS `Secret` part into a temporary local file
+   (NOT committed to Git), e.g. `rhsi/site-b/link-tls-secret-plain.yaml`.
+3. Convert to SealedSecret:
 
 ```bash
-# Make sure kubeseal points to site-b and its controller
 kubeseal --controller-namespace sealed-secrets --controller-name sealed-secrets \
   --format yaml < rhsi/site-b/link-tls-secret-plain.yaml \
   > rhsi/site-b/link-tls-sealedsecret.yaml
 
-# Immediately delete the plain secret file
 rm rhsi/site-b/link-tls-secret-plain.yaml
 ```
 
-Commit **only**:
+> The repo ships with a **placeholder** `link-tls-sealedsecret.yaml` – you **must** regenerate it
+> for your environment using `kubeseal`.
 
-- `rhsi/site-b/link-from-site-b.yaml`
-- `rhsi/site-b/link-tls-sealedsecret.yaml`
+4. Commit `link-from-site-b.yaml` + `link-tls-sealedsecret.yaml` to Git.
 
-Push to Git and let Argo for **site-b** sync.
-
-### 6.4 Verify the link
-
-After Argo syncs on site-b:
+After Argo syncs for site-b:
 
 ```bash
-# On site-b
 oc --context=site-b -n rhsi get link
-oc --context=site-b -n rhsi get pods
-
-# On site-a
 oc --context=site-a -n rhsi get link
 ```
 
-You should see the link in `Ready`/`OK` state and the Skupper router pods running on both sites.
-Once linked, services exposed via RHSI will be reachable transparently between the two clusters.
+You should see a healthy link joining the two Sites.
 
 ---
 
-## 7. PostgreSQL example across sites
+## 5. PostgreSQL primary/standby across sites
 
-To keep it reasonably simple, this example uses **Bitnami PostgreSQL with repmgr** image
-(`bitnami/postgresql-repmgr`) to build a **primary on site-a** and a **standby on site-b** using
-streaming replication. The replication traffic goes through RHSI.
+This is a lightweight example using `bitnami/postgresql-repmgr:15`:
 
-> ⚠️ This is **not** a full production design – it’s a working demo of cross-site replication.
-> For real HA, use a PostgreSQL operator (e.g. CloudNativePG) and carefully plan failover semantics.
+- **Primary** on `site-a` in namespace `db`.
+- **Standby** on `site-b` in namespace `db`.
+- Replication traffic proxied over RHSI using Connector/Listener + routing key `pg-primary`.
 
-### 7.1 PostgreSQL primary on site-a
-
-#### 7.1.1 Namespace for DB
+### 5.1 Primary on site-a (db namespace)
 
 `rhsi/site-a/db-primary/namespace-db.yaml`:
 
@@ -385,7 +251,19 @@ metadata:
   name: db
 ```
 
-#### 7.1.2 Primary Service
+`rhsi/site-a/db-primary/pg-primary-auth-secret.yaml` (example values – change for your lab):
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pg-primary-auth
+  namespace: db
+type: Opaque
+stringData:
+  postgres-password: PostgresPassw0rd!
+  repmgr-password: RepmgrPassw0rd!
+```
 
 `rhsi/site-a/db-primary/pg-primary-svc.yaml`:
 
@@ -404,8 +282,6 @@ spec:
       port: 5432
       targetPort: 5432
 ```
-
-#### 7.1.3 Primary Deployment
 
 `rhsi/site-a/db-primary/pg-primary-deploy.yaml`:
 
@@ -430,18 +306,17 @@ spec:
           image: bitnami/postgresql-repmgr:15
           imagePullPolicy: IfNotPresent
           env:
-            # PostgreSQL superuser password
             - name: POSTGRESQL_POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: pg-primary-auth
                   key: postgres-password
-            # repmgr password
             - name: REPMGR_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: pg-primary-auth
                   key: repmgr-password
+
             # Cluster config - single primary node in site-a
             - name: REPMGR_PRIMARY_HOST
               value: pg-primary.db.svc.cluster.local
@@ -451,6 +326,7 @@ spec:
               value: pg-primary.db.svc.cluster.local
             - name: REPMGR_PARTNER_NODES
               value: pg-primary.db.svc.cluster.local
+
           ports:
             - containerPort: 5432
               name: postgres
@@ -462,30 +338,9 @@ spec:
           emptyDir: {}
 ```
 
-Add a simple Secret (you can keep this in Git encrypted, or create manually):
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: pg-primary-auth
-  namespace: db
-type: Opaque
-stringData:
-  postgres-password: PostgresPassw0rd!
-  repmgr-password: RepmgrPassw0rd!
-```
-
-(You can place this Secret YAML into the repo and encrypt it the same way as link TLS.)
-
 ---
 
-### 7.2 Expose primary via RHSI (Connector on site-a)
-
-We want site-b to reach the primary in site-a via RHSI. We do this using a **Connector** on site-a
-and a **Listener** on site-b, sharing a `routingKey`.
-
-#### 7.2.1 Connector on site-a
+### 5.2 Expose primary via RHSI (Connector on site-a)
 
 `rhsi/site-a/postgres-connector.yaml`:
 
@@ -502,14 +357,11 @@ spec:
   namespace: db
 ```
 
-This tells RHSI:
-
-- In site-a, pick pods with `app=pg-primary` in namespace `db` on port `5432`,
-- Expose them on the Skupper network with routing key `pg-primary`.
+This exposes the `pg-primary` pods via the virtual application network under routing key `pg-primary`.
 
 ---
 
-### 7.3 Listener on site-b (creates a service pointing to site-a DB)
+### 5.3 Listener on site-b (service targeting the primary)
 
 `rhsi/site-b/postgres-listener.yaml`:
 
@@ -525,18 +377,17 @@ spec:
   port: 5432
 ```
 
-This creates a Kubernetes Service `pg-primary` in namespace `rhsi` on site-b, which forwards
-traffic over the RHSI link to the primary in site-a.
+On site-b, this creates a Service:
 
-Service DNS on site-b will be: `pg-primary.rhsi.svc.cluster.local`.
+- Name: `pg-primary`
+- Namespace: `rhsi`
+- DNS: `pg-primary.rhsi.svc.cluster.local`
+
+All traffic to that service is forwarded to the primary on site-a.
 
 ---
 
-### 7.4 PostgreSQL standby on site-b
-
-The standby connects to the **primary via RHSI** using the `pg-primary.rhsi.svc.cluster.local` hostname.
-
-#### 7.4.1 Namespace for DB on site-b
+### 5.4 Standby on site-b (db namespace)
 
 `rhsi/site-b/db-standby/namespace-db.yaml`:
 
@@ -547,7 +398,19 @@ metadata:
   name: db
 ```
 
-#### 7.4.2 Standby Service
+`rhsi/site-b/db-standby/pg-standby-auth-secret.yaml` (example values – change for your lab):
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pg-standby-auth
+  namespace: db
+type: Opaque
+stringData:
+  postgres-password: PostgresPassw0rd!
+  repmgr-password: RepmgrPassw0rd!
+```
 
 `rhsi/site-b/db-standby/pg-standby-svc.yaml`:
 
@@ -566,8 +429,6 @@ spec:
       port: 5432
       targetPort: 5432
 ```
-
-#### 7.4.3 Standby Deployment
 
 `rhsi/site-b/db-standby/pg-standby-deploy.yaml`:
 
@@ -603,7 +464,7 @@ spec:
                   name: pg-standby-auth
                   key: repmgr-password
 
-            # Standby configuration
+            # Standby configuration (connect to primary via RHSI)
             - name: REPMGR_PRIMARY_HOST
               value: pg-primary.rhsi.svc.cluster.local
             - name: REPMGR_PRIMARY_PORT
@@ -615,7 +476,7 @@ spec:
             - name: REPMGR_PARTNER_NODES
               value: pg-primary.rhsi.svc.cluster.local,pg-standby.db.svc.cluster.local
 
-            # This tells the container it should join as a standby
+            # Join as standby
             - name: POSTGRESQL_REPLICATION_MODE
               value: replica
             - name: POSTGRESQL_REPLICA_PRIORITY
@@ -632,41 +493,31 @@ spec:
           emptyDir: {}
 ```
 
-Authentication Secret (again, ideally encrypted in Git):
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: pg-standby-auth
-  namespace: db
-type: Opaque
-stringData:
-  postgres-password: PostgresPassw0rd!
-  repmgr-password: RepmgrPassw0rd!
-```
-
-> 🔎 For full details of the environment variables supported by `bitnami/postgresql-repmgr`,
-> refer to the Bitnami documentation. You can also extend this with additional standby nodes,
-> using `REPMGR_PARTNER_NODES` as shown in their examples.
+> For full configuration options, see the Bitnami `postgresql-repmgr` image docs.  
+> For a real deployment, replace this with your Postgres operator of choice.
 
 ---
 
-### 7.5 Sync everything with Argo and test
+## 6. Sync and test
 
-1. Commit and push all manifests under `rhsi/site-a/` and `rhsi/site-b/`.
-2. Let Argo CD applications (`rhsi-site-a` and `rhsi-site-b`) sync.
-3. Wait for pods:
+1. Point Argo CD at:
+   - `rhsi/site-a` (destination cluster `site-a`)
+   - `rhsi/site-b` (destination cluster `site-b`)
+2. Ensure RHSI operator is installed on both clusters in `rhsi` namespace.
+3. Generate and seal the **link TLS secret**, replacing `link-tls-sealedsecret.yaml` with your own.
+4. Let Argo sync both apps.
+
+Check pods:
 
 ```bash
-# Primary in site-a
+oc --context=site-a -n rhsi get pods
 oc --context=site-a -n db get pods
 
-# Standby in site-b
+oc --context=site-b -n rhsi get pods
 oc --context=site-b -n db get pods
 ```
 
-4. Use `psql` to verify replication:
+### 6.1 Sanity check replication
 
 On **site-a**:
 
@@ -684,24 +535,14 @@ oc --context=site-b -n db exec -it deploy/pg-standby -- bash
 psql -U postgres -d testdb -c "SELECT * FROM demo;"
 ```
 
-You should see the row inserted on the primary.
-
-(If you don’t, check the `pg-standby` logs for replication errors – often `pg_hba.conf`
-or replication variable tuning is needed. For a lab, you can relax `pg_hba` using the
-image’s provided env vars.)
+You should see `hello-from-site-a` in the results.
 
 ---
 
-## 8. Summary
+## 7. Next steps / integration points
 
-- RHSI **Sites** and application workloads are fully declarative and GitOps‑managed via Argo CD.
-- The **link credentials** are handled via a one-time `skupper link generate` on site-a and stored
-  as a **sealed secret** in Git for site-b.
-- PostgreSQL primary/standby replication demonstrates a real cross-cluster data path over RHSI,
-  using Connectors and Listeners to hide the network complexity.
-
-From here you can:
-
-- Wrap site-a and site-b into higher-level RHACM policies or placement rules.
-- Replace the simple PostgreSQL example with a production-grade Postgres operator.
-- Expose other services over the same RHSI virtual application network.
+- Replace Bitnami Postgres with **EDB** or another enterprise Postgres operator.
+- Wire in **Vault** for database credentials using Vault Agent Injector or Secrets Operator.
+- Move all secrets (DB creds, link TLS) to your preferred secret-management pattern
+  (Vault, External Secrets Operator, Sealed Secrets, SOPS, etc.).
+- Add RHACM Policies / PlacementRules to make RHSI + DB deployments environment-aware (dev/test/prod).
