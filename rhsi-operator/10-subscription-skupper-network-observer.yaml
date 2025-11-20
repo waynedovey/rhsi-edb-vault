@@ -1,0 +1,14 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: skupper-network-observer-operator
+  namespace: openshift-operators
+spec:
+  # NOTE: Channel and package name should match what you see in OperatorHub
+  # for "Red Hat Service Interconnect Network Observer".
+  # Adjust 'channel' and 'name' if your catalog uses different values.
+  channel: stable-2
+  installPlanApproval: Automatic
+  name: skupper-network-observer-operator-rhel9
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
