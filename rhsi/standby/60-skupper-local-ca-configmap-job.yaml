@@ -4,8 +4,6 @@ metadata:
   name: skupper-local-ca-configmap
   namespace: rhsi
   annotations:
-    # Run this job as part of the Argo CD sync so that the ConfigMap
-    # required by the skupper-network-observer Pod is always present.
     argocd.argoproj.io/hook: Sync
     argocd.argoproj.io/hook-delete-policy: HookSucceeded
 spec:
@@ -24,13 +22,11 @@ spec:
           echo "Ensuring skupper-local-ca ConfigMap exists in namespace ${KUBERNETES_NAMESPACE:-rhsi}..."
           NS="${KUBERNETES_NAMESPACE:-rhsi}"
 
-          # If the ConfigMap already exists, exit successfully (idempotent).
           if oc -n "${NS}" get configmap skupper-local-ca >/dev/null 2>&1; then
             echo "ConfigMap skupper-local-ca already exists, nothing to do."
             exit 0
           fi
 
-          # Wait for the secret created by the Certificate CRD to be present.
           echo "Waiting for secret skupper-local-ca to be created..."
           for i in $(seq 1 30); do
             if oc -n "${NS}" get secret skupper-local-ca >/dev/null 2>&1; then
@@ -45,7 +41,6 @@ spec:
             exit 1
           fi
 
-          # Extract the tls.crt from the secret and create a ConfigMap from it.
           echo "Creating ConfigMap skupper-local-ca from secret skupper-local-ca (tls.crt)..."
           oc -n "${NS}" get secret skupper-local-ca -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/ca.crt
 

@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: rhsi
+resources:
+  - 00-namespace-rhsi.yaml
+  - 10-site.yaml
+  - 20-postgres-primary-secret.yaml
+  - 30-postgres-primary-deployment.yaml
+  - 40-postgres-primary-service.yaml
+  - 50-connector-postgres.yaml
+  - 60-skupper-local-ca-configmap-job.yaml
