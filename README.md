@@ -449,3 +449,76 @@ or delete them from the clusters as appropriate.
 * Add NetworkPolicies around the `rhsi` namespace.
 * Use more advanced RHSI constructs (AccessGrant, AccessToken) once you are
   comfortable with the basics.
+
+---
+
+## 5.5. Testing RHSI/Skupper connectivity between site-a and site-b
+
+Once the link is reported as **Ready** on `site-b`:
+
+```bash
+skupper --context site-b --namespace rhsi link status
+
+NAME                                   STATUS  COST  MESSAGE
+link-rhsi-primary-skupper-router       Ready   1     OK
+```
+
+you can do a simple end-to-end HTTP test to confirm traffic can flow between clusters.
+
+### 5.5.1. Deploy a test HTTP backend on site-a
+
+Run a tiny HTTP server in the `rhsi` namespace on **site-a**:
+
+```bash
+oc --context site-a -n rhsi run skupper-backend \
+  --image=quay.io/skupper/hello-world-server \
+  --port=8080
+```
+
+Wait for the pod to be `Running`:
+
+```bash
+oc --context site-a -n rhsi get pods -l run=skupper-backend
+```
+
+### 5.5.2. Create and bind a Skupper service on site-a
+
+Expose that deployment through RHSI/Skupper:
+
+```bash
+# Create the Skupper service on port 8080
+skupper --context site-a --namespace rhsi service create skupper-backend 8080
+
+# Bind the Kubernetes deployment to the Skupper service
+skupper --context site-a --namespace rhsi service bind skupper-backend deployment skupper-backend
+```
+
+You can confirm the service is registered:
+
+```bash
+skupper --context site-a --namespace rhsi service status
+oc --context site-a -n rhsi get service skupper-backend
+```
+
+### 5.5.3. From site-b, curl the service over the link
+
+From **site-b**, launch a one-off curl pod and hit the service name:
+
+```bash
+oc --context site-b -n rhsi run curl-client \
+  --image=quay.io/curl/curl \
+  -it --rm --restart=Never -- \
+  sh -c 'curl -v http://skupper-backend:8080'
+```
+
+If the link is working correctly, you should see:
+
+* DNS resolve `skupper-backend`
+* A successful TCP connection
+* A HTTP 200 OK response and a small "hello" payload from the demo server
+
+This confirms:
+
+* `skupper-backend` is reachable by name on **site-b**
+* Traffic is being tunneled by RHSI/Skupper from **site-b** to **site-a**
+* The pod on **site-a** is serving responses across the inter-cluster link
