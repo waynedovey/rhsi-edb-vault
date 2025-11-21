@@ -4,502 +4,604 @@ End-to-end example for:
 
 * Red Hat Service Interconnect (RHSI, Skupper v2 API)
 * OpenShift GitOps (Argo CD) + RHACM ApplicationSet **cluster decision** generator
-* PostgreSQL primary/standby logical replication across two OpenShift clusters
-* **Token‑based RHSI links via HashiCorp Vault**, using the Skupper v2 **AccessGrant / AccessToken** model
+* A simple PostgreSQL primary/standby logical replication test across two OpenShift clusters
 
-This repo shows how to:
+The repo assumes:
 
-* Declare **Sites**, **AccessGrants**, and Postgres objects with GitOps.
-* Store the **sensitive link credential (AccessToken)** in Vault, not in Git.
-* Use **External Secrets Operator** on the standby site to pull AccessToken fields from Vault.
-* Create an `AccessToken` CR and let the RHSI operator redeem it into a `Link` between clusters.
+* **Hub cluster** with **RHACM** and **OpenShift GitOps** (namespace `openshift-gitops`).
+* Two managed clusters called **`site-a`** and **`site-b`** in ACM (`ManagedCluster` names).
+* Red Hat Service Interconnect operator installed on each *application* cluster.
+* You want to avoid hard-coding API URLs like `https://api.site-a...` in your manifests.
+  * We use **Placement + ApplicationSet + clusterDecisionResource** so Argo learns the
+    right cluster API URLs dynamically from ACM.
 
-> The previous TLS / SealedSecret method has been removed from the workflow.  
-> This repo now demonstrates **Vault + AccessToken** only.
+> 🔐 This repo deliberately **does not** contain any real tokens or TLS material.
+> You generate RHSI link tokens once per environment and (optionally) convert
+> them to SealedSecrets in your own fork of this repo.
 
 ---
 
-## 1. High‑level architecture
+## 1. Topology
 
-Components:
+* **Hub**: RHACM + OpenShift GitOps (`openshift-gitops`).
+* **Managed clusters** (OpenShift):
+  * `site-a` – will be labelled as **primary**.
+  * `site-b` – will be labelled as **standby**.
 
-* **Hub cluster**
-  * Runs **RHACM** and **OpenShift GitOps** (Argo CD).
-  * Optionally runs **Vault** (in this example: `vault-vault.apps.acm.sandbox2745.opentlc.com`).
+On the clusters:
 
-* **Site‑a cluster** (primary DB)
-  * Managed by ACM (`ManagedCluster` name: `site-a`).
-  * RHSI operator installed.
-  * GitOps deploys:
-    * `Site` `rhsi-primary` (`linkAccess: default`)
-    * `AccessGrant rhsi-primary-to-standby`
-    * PostgreSQL primary + service
-    * Network observer (optional)
-
-* **Site‑b cluster** (standby DB)
-  * Managed by ACM (`ManagedCluster` name: `site-b`).
-  * RHSI operator installed.
-  * **External Secrets Operator** installed.
-  * GitOps deploys:
-    * `Site` `rhsi-standby`
-    * ServiceAccount `rhsi-vault-reader`
-    * `SecretStore` pointing at Vault
-    * `ExternalSecret` that pulls AccessToken fields from Vault into `Secret rhsi-link-token`
-    * A `Job` that turns that Secret into an `AccessToken` CR
-    * Standby PostgreSQL deployment + service
-
-RHSI linking flow:
-
-1. `AccessGrant rhsi-primary-to-standby` is created on **site-a** via GitOps.
-2. A script (`scripts/publish-access-token-to-vault.sh`) reads the grant’s **status** (`code`, `url`, `ca`) and writes them to **Vault**.
-3. On **site-b**, External Secrets Operator:
-   * Authenticates to Vault via **Kubernetes auth**.
-   * Reads `code`, `url`, `ca` from Vault KV.
-   * Projects them into `Secret rhsi-link-token` in namespace `rhsi`.
-4. A `Job` on **site-b** reads `rhsi-link-token` and creates an `AccessToken` CR.
-5. RHSI/Skupper operator redeems the `AccessToken` and creates a `Link` between `site-b` and `site-a`.
-6. PostgreSQL standby connects to the primary over the RHSI tunnel.
+* Namespace `rhsi` contains:
+  * RHSI **Site** CRs.
+  * Postgres **primary** on whichever cluster is labelled `rhsi-role=primary`.
+  * Postgres **standby** on whichever cluster is labelled `rhsi-role=standby`.
+  * RHSI **Connector** on the primary side and **Listener** on the standby side
+    for a cross-site `postgres-primary` service.
+* Logical replication is configured manually using `psql` once connectivity is in place.
 
 ---
 
 ## 2. Repo layout
 
 ```text
-rhsi-edb-vault-main/
-  README.md
-  hub/
-    05-managedclustersetbinding-rhsi-clusters.yaml
-    10-placement-rhsi-primary.yaml
-    11-placement-rhsi-standby.yaml
-    12-placement-rhsi-operator.yaml
-    13-placement-rhsi-network-observer-operator.yaml
-    20-applicationset-rhsi-primary.yaml
-    21-applicationset-rhsi-standby.yaml
-    22-applicationset-rhsi-operator.yaml
-    23-applicationset-rhsi-network-observer-operator.yaml
-  rhsi-operator/
-    subscription.yaml
-  rhsi-network-observer-operator/
-    subscription.yaml
-  rhsi/
-    primary/
-      00-namespace-rhsi.yaml
-      10-site.yaml
-      15-accessgrant-standby.yaml
-      20-postgres-primary-secret.yaml
-      30-postgres-primary-deployment.yaml
-      40-postgres-primary-service.yaml
-      50-connector-postgres.yaml
-      60-networkobserver.yaml
-    standby/
-      00-namespace-rhsi.yaml
-      05-serviceaccount-vault-reader.yaml
-      10-site.yaml
-      20-postgres-standby-secret.yaml
-      30-postgres-standby-deployment.yaml
-      40-postgres-standby-service.yaml
-      50-listener-postgres.yaml
-      60-networkobserver.yaml
-      70-vault-secretstore.yaml
-      71-externalsecret-link-token.yaml
-      80-job-create-access-token.yaml
-  scripts/
-    publish-access-token-to-vault.sh
+rhsi-edb-vault/
+├─ README.md
+├─ hub/
+│  ├─ 10-placement-rhsi-primary.yaml
+│  ├─ 11-placement-rhsi-standby.yaml
+│  ├─ 20-applicationset-rhsi-primary.yaml
+│  ├─ 21-applicationset-rhsi-standby.yaml
+│  └─ optional-30-gitopscluster-example.yaml
+└─ rhsi/
+   ├─ primary/
+   │  ├─ 00-namespace-rhsi.yaml
+   │  ├─ 10-site.yaml
+   │  ├─ 20-postgres-primary-secret.yaml
+   │  ├─ 30-postgres-primary-deployment.yaml
+   │  ├─ 40-postgres-primary-service.yaml
+   │  └─ 50-connector-postgres.yaml
+   └─ standby/
+      ├─ 00-namespace-rhsi.yaml
+      ├─ 10-site.yaml
+      ├─ 20-postgres-standby-secret.yaml
+      ├─ 30-postgres-standby-deployment.yaml
+      ├─ 40-postgres-standby-service.yaml
+      └─ 50-listener-postgres.yaml
 ```
 
 ---
 
 ## 3. Prerequisites
 
-1. **Clusters and tools**
-   * One **hub** OpenShift cluster with:
-     * RHACM installed.
-     * OpenShift GitOps (Argo CD) installed.
-   * Two **managed clusters**:
-     * `site-a` – will host the **primary DB**.
-     * `site-b` – will host the **standby DB**.
-   * `oc` or `kubectl` CLI.
+On the **hub** cluster:
 
-2. **RHSI operator on app clusters**
-   * RHSI / Red Hat Service Interconnect operator installed on:
-     * `site-a`
-     * `site-b`
-   * You can use the `rhsi-operator/subscription.yaml` as an example on each application cluster.
-
-3. **Vault**
-   * HashiCorp Vault reachable from **site-b** and from wherever you run the script.
-   * A KV v2 secrets engine mounted at `rhsi` (we’ll create this below).
-   * Vault route in this example:
-     * `https://vault-vault.apps.acm.sandbox2745.opentlc.com`
-
-4. **External Secrets Operator (ESO) on site‑b**
-   * Install ESO on the **site-b** cluster, for example:
-
-     ```bash
-     helm repo add external-secrets https://charts.external-secrets.io
-     helm repo update
-
-     helm upgrade --install external-secrets external-secrets/external-secrets            -n external-secrets --create-namespace
-     ```
-
----
-
-## 4. Deploy the GitOps pieces
-
-> Run these steps with a kubeconfig/context pointing at the **hub** cluster.
-
-1. **Apply hub resources**
+1. **RHACM** is installed and managing `site-a` and `site-b`.
 
    ```bash
-   # From the repo root
-   oc apply -f hub/
+   oc get managedcluster
+   # NAME            HUB ACCEPTED   JOINED   AVAILABLE
+   # local-cluster   true           True     True
+   # site-a          true           True     True
+   # site-b          true           True     True
    ```
 
-   This will:
+2. **OpenShift GitOps** operator is installed (default namespace `openshift-gitops`).
 
-   * Bind the `rhsi-clusters` ManagedClusterSet.
-   * Create Placements for primary vs standby vs operator.
-   * Create ApplicationSets that target `site-a` and `site-b` using cluster decisions.
+3. The **GitOps–ACM integration** is in place:
+   * A `ManagedClusterSet` and `ManagedClusterSetBinding` that includes
+     `site-a` and `site-b` is bound to `openshift-gitops`.
+   * A `GitOpsCluster` registers those managed clusters to the
+     OpenShift GitOps instance.
+   * If you don’t already have this, see `hub/optional-30-gitopscluster-example.yaml`
+     as a starting point (and the ACM Applications docs).
 
-2. **Verify Argo CD apps**
+On **each managed cluster (`site-a`, `site-b`)**:
 
-   In the OpenShift GitOps UI on the hub:
+4. Install **Red Hat Service Interconnect** operator into namespace `rhsi`
+   (or globally and then target `rhsi`).
 
-   * Check that the `rhsi-primary` and `rhsi-standby` apps are **Synced** and **Healthy** on their respective clusters.
-   * Check that the RHSI operator subscription is applied to both clusters.
+5. `skupper` CLI installed locally (optional but useful for debugging).
+
+On your **laptop**:
+
+6. `oc` CLI with contexts for hub, `site-a`, and `site-b`.
+7. Optional but recommended:
+   * `kubeseal` + SealedSecrets controller if you want to GitOps your RHSI link
+     TLS secrets (not included by default in this repo).
 
 ---
 
-## 5. Primary site (site‑a) – Site & AccessGrant
+## 4. Label the managed clusters
 
-Once the `rhsi-primary` ApplicationSet is synced to **site-a**, it creates:
+We use **labels** on the ACM `ManagedCluster` resources and **Placement**
+to drive which cluster gets which manifests.
 
-* Namespace `rhsi`
-* `Site` `rhsi-primary` (with `spec.linkAccess: default`)
-* `AccessGrant` `rhsi-primary-to-standby`
-* PostgreSQL primary deployment & service
-* Network observer (optional)
-
-You can confirm on **site-a**:
+On the hub cluster:
 
 ```bash
-# Switch context to site-a
-oc config use-context site-a
+# Primary site
+oc label managedcluster site-a rhsi-role=primary --overwrite
 
-oc -n rhsi get site
-oc -n rhsi get accessgrant
+# Standby site
+oc label managedcluster site-b rhsi-role=standby --overwrite
 ```
 
-Wait until the AccessGrant is **Ready**:
-
-```bash
-oc -n rhsi wait accessgrant/rhsi-primary-to-standby       --for=condition=Ready --timeout=300s
-```
-
-The AccessGrant’s `status` will contain `code`, `url`, and `ca` which we’ll push into Vault.
+You can relabel later if you ever want to switch roles; the ApplicationSets
+will re-target automatically.
 
 ---
 
-## 6. Configure Vault
+## 5. Register clusters to OpenShift GitOps (GitOpsCluster)
 
-> These commands assume you can reach Vault (e.g. from the hub cluster) and that you have admin rights.
+If you **already** have GitOps–ACM integration set up, you can skip this
+section and move to [Section 6](#6-create-placements-on-the-hub).
 
-1. **Log into Vault and point VAULT_ADDR**
+Otherwise, on the hub:
+
+1. Make sure you have a `ManagedClusterSet` with your OpenShift clusters
+   and a `ManagedClusterSetBinding` that binds that set to the
+   `openshift-gitops` namespace (see the ACM docs).
+
+2. Create a **Placement** listing the OpenShift clusters you want GitOps
+   to manage, for example:
 
    ```bash
-   export VAULT_ADDR="https://vault-vault.apps.acm.sandbox2745.opentlc.com"
-   vault login        # however you normally authenticate
-   ```
-
-2. **Enable a KV v2 mount at `rhsi`**
-
-   ```bash
-   vault secrets enable -path=rhsi kv-v2
-   ```
-
-3. **Prepare Kubernetes auth for site‑b**
-
-   On **site-b**, the manifest `rhsi/standby/05-serviceaccount-vault-reader.yaml` creates:
-
-   ```yaml
-   apiVersion: v1
-   kind: ServiceAccount
+   cat << 'EOF' | oc apply -f -
+   apiVersion: cluster.open-cluster-management.io/v1beta1
+   kind: Placement
    metadata:
-     name: rhsi-vault-reader
-     namespace: rhsi
-   ```
-
-   Apply the standby manifests (if you haven’t already via Argo) and then grab the SA token and CA:
-
-   ```bash
-   # Switch context to site-b
-   oc config use-context site-b
-
-   SA_NS="rhsi"
-   SA_NAME="rhsi-vault-reader"
-   SECRET_NAME=$(oc -n "${SA_NS}" get sa "${SA_NAME}" -o jsonpath='{.secrets[0].name}')
-   SA_JWT=$(oc -n "${SA_NS}" get secret "${SECRET_NAME}" -o jsonpath='{.data.token}' | base64 -d)
-   SA_CA_CRT=$(oc -n "${SA_NS}" get secret "${SECRET_NAME}" -o jsonpath='{.data.ca\.crt}' | base64 -d)
-   KUBE_HOST=$(oc whoami --show-server)
-   ```
-
-   Back on a shell that has the `vault` CLI:
-
-   ```bash
-   vault auth enable kubernetes || true
-
-   vault write auth/kubernetes/config          token_reviewer_jwt="$SA_JWT"          kubernetes_host="$KUBE_HOST"          kubernetes_ca_cert="$SA_CA_CRT"
-   ```
-
-4. **Create Vault policy for site‑b**
-
-   ```bash
-   cat << 'EOF' | vault policy write rhsi-site-b -
-   path "rhsi/data/site-b/link-token" {
-     capabilities = ["read"]
-   }
+     name: all-openshift-clusters
+     namespace: openshift-gitops
+   spec:
+     predicates:
+     - requiredClusterSelector:
+         labelSelector:
+           matchExpressions:
+           - key: vendor
+             operator: In
+             values:
+             - OpenShift
    EOF
    ```
 
-5. **Create Vault Kubernetes role for site‑b**
+3. Create a **GitOpsCluster** that binds that Placement to your
+   `openshift-gitops` instance (see `hub/optional-30-gitopscluster-example.yaml`):
 
    ```bash
-   vault write auth/kubernetes/role/rhsi-site-b          bound_service_account_names="rhsi-vault-reader"          bound_service_account_namespaces="rhsi"          policies="rhsi-site-b"          ttl="1h"
+   oc apply -f hub/optional-30-gitopscluster-example.yaml
    ```
 
-   This allows pods running as `rhsi-vault-reader` on **site-b** to read the KV entry `rhsi/data/site-b/link-token`.
+After a short period, OpenShift GitOps will create cluster credentials for
+each selected `ManagedCluster`. ACM also installs a ConfigMap called
+`acm-placement` in `openshift-gitops` that the `clusterDecisionResource`
+generator uses.
 
 ---
 
-## 7. Publish AccessToken fields into Vault (from site‑a)
+## 6. Create Placements on the hub
 
-The script `scripts/publish-access-token-to-vault.sh` reads the **AccessGrant** status on **site-a** and writes the token data to Vault.
-
-Script contents (for reference):
+These determine which clusters get the primary vs standby manifests.
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-NAMESPACE="${NAMESPACE:-rhsi}"
-GRANT_NAME="${GRANT_NAME:-rhsi-primary-to-standby}"
-VAULT_ADDR="${VAULT_ADDR:-https://vault-vault.apps.acm.sandbox2745.opentlc.com}"
-VAULT_PATH="${VAULT_PATH:-rhsi/site-b/link-token}"  # KV v2 path (no /data prefix)
-
-: "${VAULT_TOKEN:?VAULT_TOKEN must be set or 'vault login' used}"
-
-echo "Waiting for AccessGrant ${GRANT_NAME} in namespace ${NAMESPACE}..."
-kubectl -n "${NAMESPACE}" wait accessgrant/"${GRANT_NAME}"       --for=condition=Ready --timeout=300s
-
-CODE=$(kubectl -n "${NAMESPACE}" get accessgrant "${GRANT_NAME}" -o jsonpath='{.status.code}')
-URL=$(kubectl -n "${NAMESPACE}" get accessgrant "${GRANT_NAME}" -o jsonpath='{.status.url}')
-CA=$(kubectl -n "${NAMESPACE}" get accessgrant "${GRANT_NAME}" -o jsonpath='{.status.ca}')
-
-if [[ -z "${CODE}" || -z "${URL}" || -z "${CA}" ]]; then
-  echo "ERROR: AccessGrant status is missing code/url/ca"
-  exit 1
-fi
-
-echo "Writing AccessToken fields to Vault at path: ${VAULT_PATH}"
-vault kv put "${VAULT_PATH}"       code="${CODE}"       url="${URL}"       ca="${CA}"
-
-echo "Done."
+oc apply -f hub/10-placement-rhsi-primary.yaml
+oc apply -f hub/11-placement-rhsi-standby.yaml
 ```
 
-To run it:
+* `rhsi-primary` selects clusters with label `rhsi-role=primary`.
+* `rhsi-standby` selects clusters with label `rhsi-role=standby`.
+
+You can verify the placement decisions with:
 
 ```bash
-# Use a kubeconfig that targets site-a (where the AccessGrant lives)
-export KUBECONFIG=/path/to/site-a-kubeconfig
-
-# Ensure Vault env is set and logged in
-export VAULT_ADDR="https://vault-vault.apps.acm.sandbox2745.opentlc.com"
-export VAULT_TOKEN=<your-vault-token>
-
-# From the repo root
-chmod +x scripts/publish-access-token-to-vault.sh
-./scripts/publish-access-token-to-vault.sh
+oc -n openshift-gitops get placementdecisions
 ```
-
-After running, you should see in Vault (via UI or CLI) a secret at:
-
-* `rhsi/data/site-b/link-token`
-
-with JSON fields:
-
-* `code`
-* `url`
-* `ca`
 
 ---
 
-## 8. Standby site (site‑b) – Vault → ExternalSecret → AccessToken
+## 7. Create ApplicationSets on the hub
 
-With the `rhsi-standby` ApplicationSet synced to **site-b**, the following manifests are applied under `rhsi/standby/`:
-
-### 8.1 SecretStore – `70-vault-secretstore.yaml`
-
-```yaml
-apiVersion: external-secrets.io/v1beta1
-kind: SecretStore
-metadata:
-  name: vault-rhsi
-  namespace: rhsi
-spec:
-  provider:
-    vault:
-      server: "https://vault-vault.apps.acm.sandbox2745.opentlc.com"
-      path: "rhsi"
-      version: "v2"
-      auth:
-        kubernetes:
-          mountPath: "kubernetes"
-          role: "rhsi-site-b"
-          serviceAccountRef:
-            name: rhsi-vault-reader
-```
-
-This tells ESO how to talk to Vault and which Kubernetes auth role to use.
-
-### 8.2 ExternalSecret – `71-externalsecret-link-token.yaml`
-
-```yaml
-apiVersion: external-secrets.io/v1beta1
-kind: ExternalSecret
-metadata:
-  name: rhsi-link-token
-  namespace: rhsi
-spec:
-  refreshInterval: 5m
-  secretStoreRef:
-    kind: SecretStore
-    name: vault-rhsi
-  target:
-    name: rhsi-link-token
-    creationPolicy: Owner
-  dataFrom:
-    - extract:
-        key: "site-b/link-token"
-```
-
-ESO will read from `rhsi/data/site-b/link-token` and create a `Secret`:
+Now create the two ApplicationSets that use the **clusterDecisionResource**
+generator. These use the ACM-provided ConfigMap `acm-placement`.
 
 ```bash
-oc config use-context site-b
-oc -n rhsi get secret rhsi-link-token -o yaml
+oc apply -f hub/20-applicationset-rhsi-primary.yaml
+oc apply -f hub/21-applicationset-rhsi-standby.yaml
 ```
 
-You should see `data.code`, `data.url`, and `data.ca` populated (base64 encoded).
+What happens:
 
-### 8.3 Job to create AccessToken – `80-job-create-access-token.yaml`
+* The ApplicationSet controller reads the PlacementDecisions from ACM.
+* For each cluster in the decision list it renders an Argo CD Application:
+  * One Application for each **primary** cluster (path `rhsi/primary`).
+  * One Application for each **standby** cluster (path `rhsi/standby`).
+* The `destination.server` in each Application is populated dynamically
+  from the ACM integration – no API URLs are hard-coded in this repo.
 
-```yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: create-access-token-from-vault
-  namespace: rhsi
-spec:
-  template:
-    metadata:
-      name: create-access-token-from-vault
-    spec:
-      serviceAccountName: rhsi-vault-reader
-      restartPolicy: Never
-      containers:
-        - name: create-access-token
-          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
-          command:
-            - /bin/bash
-            - -c
-            - |
-              set -euo pipefail
-
-              microdnf install -y kubernetes-client
-
-              CODE=$(kubectl -n rhsi get secret rhsi-link-token -o jsonpath='{.data.code}' | base64 -d)
-              URL=$(kubectl -n rhsi get secret rhsi-link-token -o jsonpath='{.data.url}' | base64 -d)
-              CA=$(kubectl -n rhsi get secret rhsi-link-token -o jsonpath='{.data.ca}' | base64 -d)
-
-              cat << EOF | kubectl apply -f -
-              apiVersion: skupper.io/v2alpha1
-              kind: AccessToken
-              metadata:
-                name: standby-from-vault
-                namespace: rhsi
-              spec:
-                code: "${CODE}"
-                url: "${URL}"
-                ca: |
-  ${CA}
-              EOF
-```
-
-Once Argo applies this Job on **site-b**, run:
+You can see the generated Applications in the OpenShift GitOps UI or with:
 
 ```bash
-oc -n rhsi get jobs
-oc -n rhsi logs job/create-access-token-from-vault
+oc -n openshift-gitops get applications.argoproj.io | grep rhsi-
 ```
-
-When the Job completes successfully, you should see:
-
-```bash
-oc -n rhsi get accesstoken
-oc -n rhsi get link
-```
-
-* The `AccessToken` CR (`standby-from-vault`) should exist.
-* A `Link` resource should be present and **Ready**, representing the connection from **site-b** to **site-a**.
 
 ---
 
-## 9. Verify RHSI link and PostgreSQL replication
+## 8. What gets deployed on each cluster
 
-1. **Check RHSI Site status**
+### 8.1 Primary cluster(s) (`rhsi-role=primary`)
 
-   On both clusters:
+From `rhsi/primary`:
+
+* Namespace `rhsi`.
+* RHSI Site CR: `Site/rhsi-primary`.
+* PostgreSQL deployment + service:
+  * `Deployment/postgres-primary`
+  * `Service/postgres-primary`
+* RHSI Connector:
+  * `Connector/postgres` (routing key `postgres`) pointing to the primary DB.
+
+### 8.2 Standby cluster(s) (`rhsi-role=standby`)
+
+From `rhsi/standby`:
+
+* Namespace `rhsi` (same name, created independently).
+* RHSI Site CR: `Site/rhsi-standby`.
+* PostgreSQL deployment + service:
+  * `Deployment/postgres-standby`
+  * `Service/postgres-standby`
+* RHSI Listener:
+  * `Listener/postgres-primary` that exposes a local service
+    `postgres-primary.rhsi.svc` on the standby cluster, forwarding
+    to the `postgres` connector on the primary site.
+
+Once the RHSI sites are linked, any pod in the standby cluster in
+namespace `rhsi` can reach the primary database at:
+
+```text
+postgres-primary.rhsi.svc.cluster.local:5432
+```
+
+---
+
+## 9. Creating a RHSI link (one-time bootstrap per environment)
+
+This repo deliberately **does not** include the link definition or TLS
+material, because they are environment-specific and sensitive.
+
+The usual GitOps-friendly pattern is:
+
+1. **On the primary site** (`site-a`), log in with `oc` and ensure the
+   `Site` CR is ready:
 
    ```bash
-   # site-a
-   oc config use-context site-a
-   oc -n rhsi get site,link
-
-   # site-b
-   oc config use-context site-b
-   oc -n rhsi get site,link
+   oc --context site-a -n rhsi get site
    ```
 
-2. **Test basic connectivity**
-
-   On **site-b**, run a test pod and reach a service that lives only on **site-a** (for example, the Postgres service on the primary).
+2. Use the `skupper` CLI to generate a **link** definition and TLS secret
+   as YAML instead of a binary token file:
 
    ```bash
-   oc -n rhsi run curl-test          --image=registry.access.redhat.com/ubi9/ubi-minimal:latest          -it --rm --restart=Never --          bash -c 'microdnf install -y curl && curl -v rhsi-postgres-primary:5432 || true'
+   # On site-a (primary)
+   skupper --namespace rhsi link generate rhsi-to-standby > /tmp/rhsi-to-standby.yaml
    ```
 
-   You should see a successful TCP connection, proving that RHSI is tunneling traffic across clusters.
+   The file contains:
 
-3. **Verify PostgreSQL replication**
+   * `Link` resource (`kind: Link`)
+   * `Secret` (`type: kubernetes.io/tls`) holding the TLS key and CA
 
-   * Connect to the **primary** database on `site-a`, create a test table and insert data.
-   * Connect to the **standby** database on `site-b` and verify that the data appears there according to your replication config.
+3. Optional but recommended: turn the TLS secret into a **SealedSecret**
+   so you can safely store it in Git.
 
-   The manifests in `rhsi/primary/` and `rhsi/standby/` include a minimal EDB/Postgres primary/standby example you can adapt to your environment.
+   ```bash
+   # Adjust namespace if your SealedSecrets controller watches another ns
+   kubeseal \
+     --controller-namespace kube-system \
+     --controller-name sealed-secrets-controller \
+     --format yaml <(yq e 'select(.kind=="Secret")' /tmp/rhsi-to-standby.yaml) \
+     > rhsi/standby/60-link-tls-sealedsecret.yaml
+   ```
+
+4. Extract the `Link` resource from the YAML (without the Secret)
+   and save it under `rhsi/standby/55-link.yaml`:
+
+   ```bash
+   yq e 'select(.kind=="Link")' /tmp/rhsi-to-standby.yaml \
+     > rhsi/standby/55-link.yaml
+   ```
+
+5. Commit those two files to **your fork** of this repository and
+   let ArgoCD sync them to the **standby** cluster(s).
+
+Once synced, you should see a link become `Ready` on the standby site:
+
+```bash
+skupper --namespace rhsi link status
+```
+
+From this point onward, the link definition and TLS identity are managed
+by GitOps just like the rest of your manifests.
+
+> Note: There are more advanced flows using `AccessGrant` and `AccessToken`
+> CRs. The pattern above sticks to the documented
+> `skupper link generate` → GitOps → SealedSecret flow.
 
 ---
 
-## 10. Rotation & cleanup
+## 10. PostgreSQL logical replication example
 
-* **Rotate the AccessToken:**
-  * Delete or update the `AccessGrant` on **site-a** if needed.
-  * Re-run `scripts/publish-access-token-to-vault.sh` to push a new `code/url/ca` into Vault.
-  * Delete and re-run the `create-access-token-from-vault` Job on **site-b**, or turn it into a `CronJob` for periodic refresh.
+Once connectivity via RHSI is working, you can set up **logical replication**
+between the primary and standby Postgres instances. This is intentionally
+simple and uses Docker Hub’s `postgres:15` image for clarity.
 
-* **Cleanup:**
-  * Delete the Argo applications or ApplicationSets from the hub to remove all the RHSI / Postgres resources.
-  * Optionally clean up the Vault KV entry `rhsi/site-b/link-token` if you no longer need this link.
+### 10.1 Create schema and publication on the primary
+
+On **site-a** (primary), open a shell into the Postgres pod:
+
+```bash
+oc --context site-a -n rhsi exec -it deploy/postgres-primary -- bash
+```
+
+Inside the pod, run:
+
+```bash
+psql -U appuser -d appdb << 'EOF'
+CREATE TABLE IF NOT EXISTS demo (
+  id   integer PRIMARY KEY,
+  msg  text
+);
+
+-- Enable logical replication on the table
+DROP PUBLICATION IF EXISTS demo_pub;
+CREATE PUBLICATION demo_pub FOR TABLE demo;
+EOF
+```
+
+Leave the pod shell.
+
+### 10.2 Create schema and subscription on the standby
+
+On **site-b** (standby), open a shell into the standby Postgres pod:
+
+```bash
+oc --context site-b -n rhsi exec -it deploy/postgres-standby -- bash
+```
+
+Inside the pod, create the same table:
+
+```bash
+psql -U appuser -d appdb << 'EOF'
+CREATE TABLE IF NOT EXISTS demo (
+  id   integer PRIMARY KEY,
+  msg  text
+);
+EOF
+```
+
+Now create a **subscription** that connects to the primary database via
+RHSI (the listener service `postgres-primary` in the same namespace):
+
+```bash
+psql -U appuser -d appdb << 'EOF'
+DROP SUBSCRIPTION IF EXISTS demo_sub;
+
+CREATE SUBSCRIPTION demo_sub
+  CONNECTION 'host=postgres-primary port=5432 dbname=appdb user=appuser password=supersecret'
+  PUBLICATION demo_pub;
+EOF
+```
+
+Leave the pod shell.
+
+> Note: For a real setup you would:
+> * Use stronger credentials and secrets managed by Vault or Kubernetes Secrets.
+> * Tune `wal_level`, `max_wal_senders`, `max_replication_slots` etc.
+>   via a ConfigMap + mounted `postgresql.conf`.
+> * Use persistent volumes instead of `emptyDir`.
+
+### 10.3 Test replication
+
+On the **primary**:
+
+```bash
+oc --context site-a -n rhsi exec -it deploy/postgres-primary -- \
+  psql -U appuser -d appdb -c "INSERT INTO demo (id, msg) VALUES (1, 'hello-from-primary');"
+```
+
+On the **standby**:
+
+```bash
+oc --context site-b -n rhsi exec -it deploy/postgres-standby -- \
+  psql -U appuser -d appdb -c "SELECT * FROM demo;"
+```
+
+You should see the row inserted on the primary appear on the standby.
 
 ---
 
-This repository is now a concrete, GitOps‑friendly example of **RHSI + Skupper v2 + Vault‑backed AccessTokens**, with a simple PostgreSQL replication demo on top.
+## 11. Cleaning up
+
+To remove everything created by this repo (but **not** the operators):
+
+On the hub:
+
+```bash
+oc delete -f hub/21-applicationset-rhsi-standby.yaml
+oc delete -f hub/20-applicationset-rhsi-primary.yaml
+oc delete -f hub/11-placement-rhsi-standby.yaml
+oc delete -f hub/10-placement-rhsi-primary.yaml
+```
+
+On each application cluster (optional if you want the namespace removed):
+
+```bash
+oc --context site-a delete ns rhsi
+oc --context site-b delete ns rhsi
+```
+
+If you created any SealedSecrets for links, remove those from your repo
+or delete them from the clusters as appropriate.
+
+---
+
+## 12. Next steps
+
+* Replace the Docker Hub Postgres image with a supported RHEL / EDB image.
+* Wire database credentials into Vault and inject them into your deployments.
+* Add NetworkPolicies around the `rhsi` namespace.
+* Use more advanced RHSI constructs (AccessGrant, AccessToken) once you are
+  comfortable with the basics.
+
+---
+
+## 5.5. Testing RHSI/Skupper connectivity between site-a and site-b
+
+Once the link is reported as **Ready** on `site-b`:
+
+```bash
+skupper --context site-b --namespace rhsi link status
+
+NAME                                   STATUS  COST  MESSAGE
+link-rhsi-primary-skupper-router       Ready   1     OK
+```
+
+you can do a simple end-to-end HTTP test to confirm traffic can flow between clusters.
+
+### 5.5.1. Deploy a test HTTP backend on site-a
+
+Run a tiny HTTP server in the `rhsi` namespace on **site-a**:
+
+```bash
+oc --context site-a -n rhsi run skupper-backend \
+  --image=quay.io/skupper/hello-world-server \
+  --port=8080
+```
+
+Wait for the pod to be `Running`:
+
+```bash
+oc --context site-a -n rhsi get pods -l run=skupper-backend
+```
+
+### 5.5.2. Create and bind a Skupper service on site-a
+
+Expose that deployment through RHSI/Skupper:
+
+```bash
+# Create the Skupper service on port 8080
+skupper --context site-a --namespace rhsi service create skupper-backend 8080
+
+# Bind the Kubernetes deployment to the Skupper service
+skupper --context site-a --namespace rhsi service bind skupper-backend deployment skupper-backend
+```
+
+You can confirm the service is registered:
+
+```bash
+skupper --context site-a --namespace rhsi service status
+oc --context site-a -n rhsi get service skupper-backend
+```
+
+### 5.5.3. From site-b, curl the service over the link
+
+From **site-b**, launch a one-off curl pod and hit the service name:
+
+```bash
+oc --context site-b -n rhsi run curl-client \
+  --image=quay.io/curl/curl \
+  -it --rm --restart=Never -- \
+  sh -c 'curl -v http://skupper-backend:8080'
+```
+
+If the link is working correctly, you should see:
+
+* DNS resolve `skupper-backend`
+* A successful TCP connection
+* A HTTP 200 OK response and a small "hello" payload from the demo server
+
+This confirms:
+
+* `skupper-backend` is reachable by name on **site-b**
+* Traffic is being tunneled by RHSI/Skupper from **site-b** to **site-a**
+* The pod on **site-a** is serving responses across the inter-cluster link
+---
+
+## 13. Installing External Secrets Operator for Red Hat OpenShift using GitOps
+
+This repository also includes optional manifests to install the **External Secrets Operator for Red Hat OpenShift** (Technology Preview) on the **standby** cluster (`rhsi-role=standby`) by using the same RHACM + OpenShift GitOps pattern as the rest of the demo.
+
+### 13.1 What gets installed
+
+On each managed cluster that matches `rhsi-role=standby` the following are created:
+
+* Namespace: `external-secrets-operator`
+* OperatorGroup: `openshift-external-secrets-operator`
+* Subscription: `openshift-external-secrets-operator` on channel `tech-preview-v0.1` from the `redhat-operators` catalog
+
+The manifests live in:
+
+* `external-secrets-operator/`
+  * `00-namespace-external-secrets-operator.yaml`
+  * `10-operatorgroup.yaml`
+  * `20-subscription.yaml`
+* `hub/14-placement-rhsi-external-secrets-operator.yaml`
+  * ACM `Placement` that selects clusters with label `rhsi-role=standby`
+* `hub/24-applicationset-rhsi-external-secrets-operator.yaml`
+  * Argo CD `ApplicationSet` that pushes the External Secrets Operator manifests to selected clusters
+
+> **Note:** External Secrets Operator for Red Hat OpenShift is currently a Technology Preview feature.
+> Check the OpenShift documentation for support status and any changes to channel or catalog source names.
+
+### 13.2 Enabling the operator via GitOps
+
+1. Make sure your standby cluster (`site-b`) is labelled correctly on the hub:
+
+   ```bash
+   oc label managedcluster site-b rhsi-role=standby --overwrite
+   ```
+
+2. On the **hub** cluster, apply the new Placement and ApplicationSet (in the `openshift-gitops` namespace):
+
+   ```bash
+   # From the root of this repo, logged into the hub
+   oc apply -f hub/14-placement-rhsi-external-secrets-operator.yaml
+   oc apply -f hub/24-applicationset-rhsi-external-secrets-operator.yaml
+   ```
+
+3. In the OpenShift GitOps UI on the hub, you should now see an `ApplicationSet` named:
+
+   * `rhsi-external-secrets-operator`
+
+   And per-cluster `Application` objects named similar to:
+
+   * `rhsi-external-secrets-operator-site-b`
+
+4. On the **standby** cluster (`site-b`), verify that the operator installed successfully:
+
+   ```bash
+   oc get csv -n external-secrets-operator
+   ```
+
+   You should see a `ClusterServiceVersion` similar to:
+
+   ```
+   NAME                               DISPLAY                                           VERSION   PHASE
+   external-secrets-operator.v0.1.0   External Secrets Operator for Red Hat OpenShift   0.1.0     Succeeded
+   ```
+
+5. (Optional) Verify that the `external-secrets` CRDs are present:
+
+   ```bash
+   oc get crd | grep external-secrets
+   ```
+
+### 13.3 Wiring External Secrets to Vault (high level)
+
+Once the operator is installed, you can define `SecretStore` and `ExternalSecret` resources in the `rhsi` namespace to pull credentials from your Vault instance, for example:
+
+* `SecretStore` with provider type `vault` pointing to `https://vault-vault.apps.acm.sandbox2745.opentlc.com`
+* `ExternalSecret` that projects Vault keys (for example, database passwords) into a Kubernetes `Secret` such as `postgres-credentials`
+
+The exact configuration (Vault path, auth method: token / Kubernetes / AppRole, TLS details, etc.) is environment-specific, so it is not hard-coded into this demo. You can add those manifests under:
+
+* `rhsi/standby/`
+
+and manage them with the existing `rhsi-standby` ApplicationSet in the same GitOps flow.
