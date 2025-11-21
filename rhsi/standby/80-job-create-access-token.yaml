@@ -21,7 +21,6 @@ spec:
 
               microdnf install -y kubernetes-client
 
-              # Read token fields from Secret created by External Secrets
               CODE=$(kubectl -n rhsi get secret rhsi-link-token -o jsonpath='{.data.code}' | base64 -d)
               URL=$(kubectl -n rhsi get secret rhsi-link-token -o jsonpath='{.data.url}' | base64 -d)
               CA=$(kubectl -n rhsi get secret rhsi-link-token -o jsonpath='{.data.ca}' | base64 -d)
@@ -36,5 +35,5 @@ spec:
                 code: "${CODE}"
                 url: "${URL}"
                 ca: |
-$(echo "${CA}" | sed 's/^/      /')
+${CA}
               EOF

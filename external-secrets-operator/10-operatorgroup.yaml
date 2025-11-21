@@ -4,5 +4,4 @@ metadata:
   name: openshift-external-secrets-operator
   namespace: external-secrets-operator
 spec:
-  # Empty targetNamespaces means: watch all namespaces in the cluster
   targetNamespaces: []
