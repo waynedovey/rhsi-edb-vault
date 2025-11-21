@@ -1,0 +1,10 @@
+apiVersion: skupper.io/v2alpha1
+kind: AccessGrant
+metadata:
+  name: rhsi-primary-to-standby
+  namespace: rhsi
+spec:
+  # How many times this grant can be redeemed for an access token
+  redemptionsAllowed: 5
+  # How long each token is redeemable after it is issued
+  expirationWindow: 24h
