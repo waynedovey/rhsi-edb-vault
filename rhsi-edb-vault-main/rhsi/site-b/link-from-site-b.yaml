@@ -1,0 +1,18 @@
+# Link resource from site-b to site-a.
+# IMPORTANT: You must replace endpoint host/ports to match your 'skupper link generate' output.
+apiVersion: skupper.io/v2alpha1
+kind: Link
+metadata:
+  name: site-b-link
+  namespace: rhsi
+spec:
+  endpoints:
+    - group: skupper-router-1
+      host: REPLACE_ME_ENDPOINT_HOST
+      name: inter-router
+      port: "55671"
+    - group: skupper-router-1
+      host: REPLACE_ME_ENDPOINT_HOST
+      name: edge
+      port: "45671"
+  tlsCredentials: site-b-link-tls

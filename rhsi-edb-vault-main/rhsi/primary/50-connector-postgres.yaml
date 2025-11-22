@@ -1,0 +1,10 @@
+apiVersion: skupper.io/v2alpha1
+kind: Connector
+metadata:
+  name: postgres
+  namespace: rhsi
+spec:
+  # Remote sites will use routingKey 'postgres' to reach this service
+  routingKey: postgres
+  selector: app=postgres-primary
+  port: 5432
