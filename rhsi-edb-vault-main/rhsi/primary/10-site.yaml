@@ -1,8 +1,0 @@
-apiVersion: skupper.io/v2alpha1
-kind: Site
-metadata:
-  name: rhsi-primary
-  namespace: rhsi
-spec:
-  # Allow other sites to connect to this site
-  linkAccess: default
