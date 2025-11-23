@@ -12,21 +12,20 @@ spec:
       restartPolicy: Never
       containers:
         - name: create-access-token
-          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          image: registry.redhat.io/openshift4/ose-cli:latest
           command:
             - /bin/bash
             - -c
             - |
               set -euo pipefail
 
-              microdnf install -y kubernetes-client
+              echo "Reading AccessToken fields from Secret rhsi-link-token..."
 
-              # Read token fields from Secret created by External Secrets
-              CODE=$(kubectl -n rhsi get secret rhsi-link-token -o jsonpath='{.data.code}' | base64 -d)
-              URL=$(kubectl -n rhsi get secret rhsi-link-token -o jsonpath='{.data.url}' | base64 -d)
-              CA=$(kubectl -n rhsi get secret rhsi-link-token -o jsonpath='{.data.ca}' | base64 -d)
+              CODE=$(oc -n rhsi get secret rhsi-link-token -o jsonpath='{.data.code}' | base64 -d)
+              URL=$(oc -n rhsi get secret rhsi-link-token -o jsonpath='{.data.url}' | base64 -d)
+              CA=$(oc -n rhsi get secret rhsi-link-token -o jsonpath='{.data.ca}' | base64 -d)
 
-              cat << EOF | kubectl apply -f -
+              cat << EOF | oc apply -f -
               apiVersion: skupper.io/v2alpha1
               kind: AccessToken
               metadata:
@@ -38,3 +37,5 @@ spec:
                 ca: |
                 ${CA}
               EOF
+
+              echo "AccessToken standby-from-vault created/updated."
