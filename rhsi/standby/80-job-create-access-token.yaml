@@ -1,0 +1,52 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-access-token-from-vault
+  namespace: rhsi
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      name: create-access-token-from-vault
+    spec:
+      serviceAccountName: rhsi-vault-reader
+      restartPolicy: Never
+      containers:
+        - name: create-access-token
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+
+              echo "Waiting for Secret rhsi-link-token to exist..."
+              for i in {1..60}; do
+                if oc -n rhsi get secret rhsi-link-token >/dev/null 2>&1; then
+                  echo "Secret rhsi-link-token found."
+                  break
+                fi
+                echo "  still waiting... (${i})"
+                sleep 5
+              done
+
+              echo "Reading AccessToken fields from Secret rhsi-link-token..."
+
+              CODE=$(oc -n rhsi get secret rhsi-link-token -o jsonpath='{.data.code}' | base64 -d)
+              URL=$(oc -n rhsi get secret rhsi-link-token -o jsonpath='{.data.url}' | base64 -d)
+              CA=$(oc -n rhsi get secret rhsi-link-token -o jsonpath='{.data.ca}' | base64 -d)
+
+              cat << EOF | oc apply -f -
+              apiVersion: skupper.io/v2alpha1
+              kind: AccessToken
+              metadata:
+                name: standby-from-vault
+                namespace: rhsi
+              spec:
+                code: "${CODE}"
+                url: "${URL}"
+                ca: |
+                ${CA}
+              EOF
+
+              echo "AccessToken standby-from-vault created/updated."
