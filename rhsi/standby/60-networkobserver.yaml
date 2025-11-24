@@ -1,6 +1,0 @@
-apiVersion: observability.skupper.io/v2alpha1
-kind: NetworkObserver
-metadata:
-  name: networkobserver
-  namespace: rhsi
-spec: {}
