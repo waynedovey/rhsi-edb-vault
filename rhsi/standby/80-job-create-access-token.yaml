@@ -30,23 +30,28 @@ spec:
                 sleep 5
               done
 
-              echo "Reading AccessToken fields from Secret rhsi-link-token..."
+              if ! oc -n rhsi get secret rhsi-link-token >/dev/null 2>&1; then
+                echo "ERROR: Secret rhsi-link-token did not appear within timeout."
+                exit 1
+              fi
 
+              echo "Reading AccessToken fields from Secret rhsi-link-token..."
               CODE=$(oc -n rhsi get secret rhsi-link-token -o jsonpath='{.data.code}' | base64 -d)
               URL=$(oc -n rhsi get secret rhsi-link-token -o jsonpath='{.data.url}' | base64 -d)
               CA=$(oc -n rhsi get secret rhsi-link-token -o jsonpath='{.data.ca}' | base64 -d)
 
-              cat << EOF | oc apply -f -
-              apiVersion: skupper.io/v2alpha1
-              kind: AccessToken
-              metadata:
-                name: standby-from-vault
-                namespace: rhsi
-              spec:
-                code: "${CODE}"
-                url: "${URL}"
-                ca: |
-                ${CA}
-              EOF
+              echo "Creating AccessToken standby-from-vault..."
+              {
+                echo "apiVersion: skupper.io/v2alpha1"
+                echo "kind: AccessToken"
+                echo "metadata:"
+                echo "  name: standby-from-vault"
+                echo "  namespace: rhsi"
+                echo "spec:"
+                echo "  code: \"${CODE}\""
+                echo "  url: \"${URL}\""
+                echo "  ca: |"
+                echo "${CA}" | sed 's/^/    /'
+              } | oc apply -f -
 
               echo "AccessToken standby-from-vault created/updated."
