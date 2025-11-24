@@ -128,48 +128,19 @@ On each **managed cluster (site-a, site-b)**:
    grant URL on `site-a` (HTTPS).
 5. `skupper` CLI installed locally (optional but useful for debugging).
 
-6. Install the **OpenShift External Secrets Operator** on each application cluster
-   (`site-a` and `site-b`) if you want to use the Vault-backed link example:
+6. Ensure the **OpenShift External Secrets Operator** is installed on each application cluster (`site-a` and `site-b`).
 
-   ```bash
-   oc new-project external-secrets-operator
+   You do **not** need to install it manually. This repo includes Argo CD configuration on the ACM hub that deploys the operator for you:
 
-   cat << 'EOF' | oc apply -f -
-   apiVersion: operators.coreos.com/v1
-   kind: OperatorGroup
-   metadata:
-     name: openshift-external-secrets-operator
-     namespace: external-secrets-operator
-   spec:
-     targetNamespaces: []
-   ---
-   apiVersion: operators.coreos.com/v1alpha1
-   kind: Subscription
-   metadata:
-     name: openshift-external-secrets-operator
-     namespace: external-secrets-operator
-   spec:
-     channel: tech-preview-v0.1
-     name: openshift-external-secrets-operator
-     source: redhat-operators
-     sourceNamespace: openshift-marketplace
-     installPlanApproval: Automatic
-   ---
-   apiVersion: operator.openshift.io/v1alpha1
-   kind: ExternalSecrets
-   metadata:
-     name: cluster
-     labels:
-       app.kubernetes.io/name: external-secrets-operator
-   spec: {}
-   EOF
-   ```
+   - `hub/14-placement-rhsi-external-secrets-operator.yaml` creates an ACM placement that selects clusters labelled `rhsi-role` in `{primary, standby}`.
+   - `hub/24-applicationset-rhsi-external-secrets-operator.yaml` defines an `ApplicationSet` in `openshift-gitops` that:
+     - Targets the clusters returned by that placement.
+     - Syncs the manifests in `rhsi-external-secrets-operator/` into each cluster, which:
+       - Create the `external-secrets-operator` namespace.
+       - Create the `OperatorGroup` and `Subscription` for the **OpenShift External Secrets Operator**.
+       - Create the cluster-scoped `ExternalSecrets` CR (`externalsecrets.operator.openshift.io/cluster`) in `external-secrets-operator`.
 
-   That CR (`externalsecrets.operator.openshift.io/cluster`) turns on the
-   external-secrets.io controllers that are used by
-   `rhsi/standby/70-secretstore-vault-rhsi.yaml` and
-   `rhsi/standby/75-externalsecret-rhsi-link-token.yaml` to read the Skupper
-   link token from Vault.
+   Once the hub manifests are applied and Argo CD has reconciled, the operator will be running on both `site-a` and `site-b` and ready for the Vault-backed Skupper link example.
 
 On your **laptop**:
 
@@ -467,180 +438,3 @@ replication between the two PostgreSQL instances once the Skupper link is up.
 (Details of the logical replication configuration and test steps can be
 documented here, or you can adapt this section to your specific EDB/Postgres
 setup.)
-
-## Skupper link via Vault-stored AccessToken (updated flow)
-
-This repository now uses the **Skupper v2 AccessGrant + Vault + ExternalSecrets** pattern so that
-the **standby** site can obtain and redeem a Skupper access token fully automatically.
-
-High-level flow:
-
-1. **Primary site (site-a)** issues an `AccessGrant`.
-2. The **AccessGrant status** (`ca`, `code`, `url`) is written into Vault under `rhsi/site-a/link-token`
-   and `rhsi/site-b/link-token`.
-3. On **standby site (site-b)**, `ExternalSecret rhsi-link-token` reads from Vault and creates the
-   in-cluster `Secret rhsi-link-token` with the three fields: `ca`, `code`, `url`.
-4. A small **Job** (`create-access-token-from-vault`) reads `rhsi-link-token` and creates the
-   Skupper `AccessToken standby-from-vault` resource.
-5. The Skupper controller uses that `AccessToken` to establish a **link** from `rhsi-standby`
-   to `rhsi-primary`.
-6. **Connectors** on the primary and **listeners** on the standby then provide L4 Postgres
-   connectivity across clusters.
-
-### 1. Create AccessGrant on primary (site-a)
-
-On **site-a** (primary), in the `rhsi` namespace, apply the `AccessGrant` manifest:
-
-```bash
-oc --context site-a -n rhsi apply -f rhsi-standby-grant.yaml
-
-oc --context site-a -n rhsi get accessgrant rhsi-standby-grant -o yaml
-```
-
-Wait until the `status` is `Ready`. Then capture the three important fields:
-
-```bash
-oc --context site-a -n rhsi get accessgrant rhsi-standby-grant   -o jsonpath='{.status.ca}'   > /tmp/grant-ca.pem
-
-oc --context site-a -n rhsi get accessgrant rhsi-standby-grant   -o jsonpath='{.status.code}' > /tmp/grant-code
-
-oc --context site-a -n rhsi get accessgrant rhsi-standby-grant   -o jsonpath='{.status.url}'  > /tmp/grant-url
-```
-
-And write them into Vault for both sites:
-
-```bash
-CODE=$(cat /tmp/grant-code)
-URL=$(cat /tmp/grant-url)
-
-vault kv put rhsi/site-a/link-token   ca=@/tmp/grant-ca.pem   code="$CODE"   url="$URL"
-
-vault kv put rhsi/site-b/link-token   ca=@/tmp/grant-ca.pem   code="$CODE"   url="$URL"
-```
-
-### 2. ExternalSecrets + SecretStore (site-b)
-
-On **site-b**, the `SecretStore vault-rhsi` is configured to use the Vault
-`kubernetes-site-b` auth mount and role `rhsi-site-b`. The important bits:
-
-- `spec.provider.vault.server` points at the Vault route
-- `spec.provider.vault.path` is `rhsi`
-- `spec.provider.vault.auth.kubernetes.mountPath` is `kubernetes-site-b`
-- `spec.provider.vault.auth.kubernetes.role` is `rhsi-site-b`
-- `spec.provider.vault.caProvider` references the Vault CA secret
-
-The `ExternalSecret` looks up `rhsi/site-b/link-token` and creates
-`Secret rhsi-link-token` in the `rhsi` namespace with keys:
-
-- `ca`
-- `code`
-- `url`
-
-You can force a reconcile if needed:
-
-```bash
-oc --context site-b -n rhsi annotate externalsecret rhsi-link-token   reconciled-at="$(date +%s)" --overwrite
-```
-
-And verify the resulting secret:
-
-```bash
-oc --context site-b -n rhsi get secret rhsi-link-token -o yaml
-```
-
-### 3. Job: create AccessToken from Vault (site-b)
-
-On **site-b**, the `Job create-access-token-from-vault`:
-
-- waits for `Secret rhsi-link-token`,
-- reads the `ca`, `code`, `url` keys,
-- and creates/updates an `AccessToken` named `standby-from-vault`.
-
-This produces an object like:
-
-```yaml
-apiVersion: skupper.io/v2alpha1
-kind: AccessToken
-metadata:
-  name: standby-from-vault
-  namespace: rhsi
-spec:
-  ca: |-
-    -----BEGIN CERTIFICATE-----
-    ...
-    -----END CERTIFICATE-----
-  code: qUObUPgnx0FxOSqcDpSddcfD
-  url: https://skupper-grant-server-https-openshift-operators.apps.site-a.sandbox2745.opentlc.com:443/...
-```
-
-Once this exists, Skupper will automatically redeem it and create the link.
-
-### 4. Validate Skupper sites and link
-
-Check the sites:
-
-```bash
-skupper --context site-a -n rhsi site status
-skupper --context site-b -n rhsi site status
-```
-
-You should see both `rhsi-primary` and `rhsi-standby` in `Ready` state.
-
-Check the link from the standby site:
-
-```bash
-skupper --context site-b -n rhsi link status
-```
-
-Example output:
-
-```text
-NAME                  STATUS  COST  MESSAGE
-standby-from-vault    Ready   0     OK
-```
-
-On the standby site you can also inspect the link CR:
-
-```bash
-oc --context site-b -n rhsi get links.skupper.io
-```
-
-and confirm the `REMOTE SITE` is `rhsi-primary`.
-
-### 5. Postgres connector + listener
-
-The repo also includes:
-
-- A **connector** on `site-a` (`connector-postgres.yaml`)
-- A **listener** on `site-b` (`listener-postgres.yaml`)
-
-Apply them like this:
-
-```bash
-# Primary / site-a
-oc --context site-a -n rhsi apply -f connector-postgres.yaml
-skupper --context site-a -n rhsi connector status
-
-# Standby / site-b
-oc --context site-b -n rhsi apply -f listener-postgres.yaml
-skupper --context site-b -n rhsi listener status
-```
-
-You should see something like:
-
-```text
-NAME                  STATUS  ROUTING-KEY  SELECTOR                HOST  PORT  HAS MATCHING LISTENER  MESSAGE
-postgres              Ready   postgres     app=postgres-primary          5432  true                   OK
-```
-
-and
-
-```text
-NAME                  STATUS  ROUTING-KEY  HOST              PORT  MATCHING-CONNECTOR  MESSAGE
-postgres-primary      Ready   postgres      postgres-primary  5432  true                OK
-```
-
-which indicates that Postgres from the **primary** cluster is now available
-via Skupper on the **standby** cluster as `Service postgres-primary` on
-port `5432`.
-
