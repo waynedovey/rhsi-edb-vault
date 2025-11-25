@@ -346,30 +346,46 @@ do the following **once per standby cluster**.
 
 ### 8.2 Store the Skupper grant in Vault
 
-On **site-a** (primary), create a Skupper grant for the standby site using
-either the Skupper CLI or the `AccessGrant` CR (see the Skupper
-documentation for the exact commands).
+On **site-a** (primary), create the `AccessGrant` (for example
+`AccessGrant/rhsi-standby-grant` in the `rhsi` namespace) and wait until it
+has a `Ready` status.
 
-From the grant, you need three fields:
-
-* `code` – the grant code Skupper will redeem
-* `url` – the HTTPS URL of the grant server
-* `ca` – the PEM-encoded certificate for `SkupperGrantServerCA`
-
-Create a secret at the expected path in Vault:
+Instead of copying values by hand, you can grab the `code`, `url` and `ca`
+directly from the `AccessGrant` and write them into Vault:
 
 ```bash
-vault kv put rhsi/site-b/link-token   code="<grant-code-from-site-a>"   url="<grant-url-from-site-a>"   ca=@/path/to/skupper-grant-server-ca.pem
-```
+# Where Skupper + the AccessGrant live
+export CONTEXT=site-a
+export NAMESPACE=rhsi
+export GRANT_NAME=rhsi-standby-grant
 
-You can verify it later with:
+# Where to store the token for the standby site
+export VAULT_PATH=rhsi/site-b/link-token
 
-```bash
-vault kv get rhsi/site-b/link-token
-```
+# 1. Read the grant code and URL from the AccessGrant status
+GRANT_CODE_FROM_SITE_A="$(
+  oc --context "${CONTEXT}" -n "${NAMESPACE}" \
+     get accessgrant "${GRANT_NAME}" \
+     -o jsonpath='{.status.code}'
+)"
 
-The example in this repo expects exactly that path
-`rhsi/site-b/link-token` and those three keys (`code`, `url`, `ca`).
+GRANT_URL_FROM_SITE_A="$(
+  oc --context "${CONTEXT}" -n "${NAMESPACE}" \
+     get accessgrant "${GRANT_NAME}" \
+     -o jsonpath='{.status.url}'
+)"
+
+# 2. Dump the Skupper grant server CA cert to a file
+oc --context "${CONTEXT}" -n "${NAMESPACE}" \
+   get accessgrant "${GRANT_NAME}" \
+   -o jsonpath='{.status.ca}' \
+   > skupper-grant-server-ca.pem
+
+# 3. Store everything in Vault under the expected path/key names
+vault kv put "${VAULT_PATH}" \
+  code="${GRANT_CODE_FROM_SITE_A}" \
+  url="${GRANT_URL_FROM_SITE_A}" \
+  ca=@skupper-grant-server-ca.pem
 
 ---
 
