@@ -345,7 +345,12 @@ do the following **once per standby cluster**.
    }
    EOF
 
-   vault write auth/kubernetes-site-b/role/rhsi-site-b      bound_service_account_names="rhsi-vault-reader"      bound_service_account_namespaces="rhsi"      token_policies="rhsi-site-b"      ttl="1h"
+   vault write auth/kubernetes-site-b/role/rhsi-site-b \
+     bound_service_account_names="rhsi-vault-reader" \
+     bound_service_account_namespaces="rhsi" \
+     token_policies="rhsi-site-b" \
+     ttl="1h"
+
    ```
 
 > During debugging you can temporarily widen the role with
