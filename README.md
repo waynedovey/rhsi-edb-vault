@@ -537,3 +537,7 @@ This confirms:
 - The Skupper link `standby-from-vault` is **Ready** on `site-b`.
 - The Skupper listener `postgres-primary` and connector `postgres` are **Ready**.
 - The standby site can reach the primary PostgreSQL instance over the Skupper network.
+## Architecture
+
+![Architecture overview](docs/rhsi-edb-vault-architecture.png)
+
