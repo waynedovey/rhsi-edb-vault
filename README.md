@@ -285,6 +285,18 @@ At a high level:
 
 Nothing sensitive (grant code, URL, CA) lives in Git.
 
+> **Prerequisite – enable KV v2 secrets engine at `rhsi/`**
+>
+> This lab assumes a KV v2 secrets engine mounted at `rhsi/`.
+> If `vault secrets list` only shows `cubbyhole/`, run:
+>
+> ```bash
+> vault secrets enable -path=rhsi kv-v2
+> ```
+>
+> or use the Vault UI (**Secrets Engines → Enable new engine → KV (v2)**,
+> path `rhsi`).
+
 ---
 
 ### 8.1 Prepare Vault Kubernetes auth for `site-b`
@@ -344,48 +356,64 @@ do the following **once per standby cluster**.
 
 ---
 
+
 ### 8.2 Store the Skupper grant in Vault
 
-On **site-a** (primary), create the `AccessGrant` (for example
-`AccessGrant/rhsi-standby-grant` in the `rhsi` namespace) and wait until it
-has a `Ready` status.
+On **site-a** (primary), create the Skupper `AccessGrant` that will be used
+to issue short-lived tokens for the standby site.
 
-Instead of copying values by hand, you can grab the `code`, `url` and `ca`
-directly from the `AccessGrant` and write them into Vault:
+From the repo root on your laptop:
 
 ```bash
-# Where Skupper + the AccessGrant live
 export CONTEXT=site-a
 export NAMESPACE=rhsi
 export GRANT_NAME=rhsi-standby-grant
 
-# Where to store the token for the standby site
-export VAULT_PATH=rhsi/site-b/link-token
+# Create (or update) the AccessGrant on site-a
+oc --context "${CONTEXT}" apply -f rhsi/site-a/rhsi-standby-grant.yaml
 
-# 1. Read the grant code and URL from the AccessGrant status
+# Check it exists and is Ready
+oc --context "${CONTEXT}" -n "${NAMESPACE}" get accessgrant
+```
+
+Once `rhsi-standby-grant` shows a `Ready` status, extract the grant details
+(`code`, `url`, `ca`) directly from the AccessGrant and write them into
+Vault.
+
+> **Note:** The `vault kv put` command below must be run with a Vault token
+> that has **create/update** permissions on `rhsi/data/site-b/*` and can
+> read the KV mount metadata at `sys/internal/ui/mounts/rhsi`. For setup,
+> you can use an admin/root token or a token with a policy like `rhsi-admin`.
+
+```bash
+# Read the grant code and URL from the AccessGrant status
 GRANT_CODE_FROM_SITE_A="$(
-  oc --context "${CONTEXT}" -n "${NAMESPACE}" \
-     get accessgrant "${GRANT_NAME}" \
-     -o jsonpath='{.status.code}'
+  oc --context "${CONTEXT}" -n "${NAMESPACE}"      get accessgrant "${GRANT_NAME}"      -o jsonpath='{.status.code}'
 )"
 
 GRANT_URL_FROM_SITE_A="$(
-  oc --context "${CONTEXT}" -n "${NAMESPACE}" \
-     get accessgrant "${GRANT_NAME}" \
-     -o jsonpath='{.status.url}'
+  oc --context "${CONTEXT}" -n "${NAMESPACE}"      get accessgrant "${GRANT_NAME}"      -o jsonpath='{.status.url}'
 )"
 
-# 2. Dump the Skupper grant server CA cert to a file
-oc --context "${CONTEXT}" -n "${NAMESPACE}" \
-   get accessgrant "${GRANT_NAME}" \
-   -o jsonpath='{.status.ca}' \
-   > skupper-grant-server-ca.pem
+# Dump the Skupper grant server CA cert to a file
+oc --context "${CONTEXT}" -n "${NAMESPACE}"    get accessgrant "${GRANT_NAME}"    -o jsonpath='{.status.ca}'    > skupper-grant-server-ca.pem
 
-# 3. Store everything in Vault under the expected path/key names
-vault kv put "${VAULT_PATH}" \
+# Store everything in Vault under the expected path/key names
+vault kv put rhsi/site-b/link-token \
   code="${GRANT_CODE_FROM_SITE_A}" \
   url="${GRANT_URL_FROM_SITE_A}" \
   ca=@skupper-grant-server-ca.pem
+```
+
+This populates Vault with:
+
+- `code` → the grant code (was `<grant-code-from-site-a>`)
+- `url`  → the grant URL (was `<grant-url-from-site-a>`)
+- `ca`   → contents of `skupper-grant-server-ca.pem`
+
+The rest of the repo (SecretStore, ExternalSecret and
+`create-access-token-from-vault` Job) all expect exactly this path
+`rhsi/site-b/link-token` and these three keys (`code`, `url`, `ca`).
 
 ---
 
