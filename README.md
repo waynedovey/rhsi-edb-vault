@@ -130,46 +130,19 @@ On each **managed cluster (site-a, site-b)**:
 
 6. Ensure the **OpenShift External Secrets Operator** is installed on each application
    cluster (`site-a` and `site-b`) if you want to use the Vault-backed link example.
-   - In this lab, the hub Argo CD app `hub/20-app-rhsi-external-secrets-operator.yaml`
-     deploys the operator into each application cluster for you.
-   - If you are not using the Argo CD apps from this repo, you can install the operator
-     manually as shown below:
+
+   - In this lab, the External Secrets Operator and its cluster-level CR are
+     deployed via the hub Argo CD app definitions under `hub/`.
+   - If you are not using the Argo CD apps from this repo and just want to apply
+     the manifests directly, you can run the following from the hub cluster:
 
    ```bash
-   oc new-project external-secrets-operator
-
-   cat << 'EOF' | oc apply -f -
-   apiVersion: operators.coreos.com/v1
-   kind: OperatorGroup
-   metadata:
-     name: openshift-external-secrets-operator
-     namespace: external-secrets-operator
-   spec:
-     targetNamespaces: []
-   ---
-   apiVersion: operators.coreos.com/v1alpha1
-   kind: Subscription
-   metadata:
-     name: openshift-external-secrets-operator
-     namespace: external-secrets-operator
-   spec:
-     channel: tech-preview-v0.1
-     name: openshift-external-secrets-operator
-     source: redhat-operators
-     sourceNamespace: openshift-marketplace
-     installPlanApproval: Automatic
-   ---
-   apiVersion: operator.openshift.io/v1alpha1
-   kind: ExternalSecrets
-   metadata:
-     name: cluster
-     labels:
-       app.kubernetes.io/name: external-secrets-operator
-   spec: {}
-   EOF
+   oc --context <hub-context> apply -f hub/
    ```
 
-   That CR (`externalsecrets.operator.openshift.io/cluster`) turns on the
+   This creates the Argo CD apps (including the external-secrets-operator
+   components) and the cluster-level `ExternalSecrets` CR
+   (`externalsecrets.operator.openshift.io/cluster`), which turns on the
    external-secrets.io controllers that are used by
    `rhsi/standby/70-secretstore-vault-rhsi.yaml` and
    `rhsi/standby/75-externalsecret-rhsi-link-token.yaml` to read the Skupper
@@ -511,6 +484,33 @@ simple as updating the Vault entry and re-running the job.
 > uses the Vault + AccessToken approach described above.
 
 ---
+
+### 8.4 Sanity check: Skupper + Vault link
+
+To avoid chasing 404s from the Skupper grant server, this repo includes a helper
+script that verifies the entire chain from the AccessGrant on **site-a** through
+Vault, External Secrets and the `AccessToken` on **site-b**:
+
+- Skupper link on site-b is **Ready** (`skupper link status`)
+- `AccessToken` `standby-from-vault` exists and is **Ready**
+- `SecretStore` `vault-rhsi` and `ExternalSecret` `rhsi-link-token` are **Ready**
+- The `rhsi-link-token` Secret on site-b matches the `AccessGrant` on site-a
+  (`url`, `code`, `ca`)
+- The Vault KV entry `rhsi/site-b/link-token` also matches the `AccessGrant`
+
+Run it from your laptop (or wherever you have `oc`, `vault` and `skupper`
+configured) like this:
+
+```bash
+SITE_A_CTX=site-a \
+SITE_B_CTX=site-b \
+NAMESPACE=rhsi \
+./scripts/sanity-check-skupper-vault-link.sh
+```
+
+If everything is wired up correctly you should see `Sanity check PASSED`. Any
+mismatch will be reported with a `[FAIL]` line so you can immediately see which
+piece is out of sync.
 
 ## 9. PostgreSQL logical replication example
 
