@@ -70,13 +70,6 @@ At this point you should see:
 All of the following `vault` commands are executed from wherever you have
 `vault` CLI access to your Vault server.
 
-Set your Vault endpoint and token (adjust as appropriate for non-lab environments):
-
-```bash
-export VAULT_ADDR="https://vault-vault.apps.acm.sandbox2745.opentlc.com"
-export VAULT_TOKEN="root"
-```
-
 ### 3.1 Enable KV v2 at `rhsi/`
 
 ```bash
@@ -149,7 +142,7 @@ vault write auth/kubernetes-site-b/role/rhsi-site-b   bound_service_account_name
 
 ## 4. External Secrets configuration on `site-b`
 
-The manifests under `rhsi/standby/` create the ESO integration:
+The manifests under `rhsi/standby/` create the ESO integration (deployed via Argo CD):
 
 - `SecretStore` `vault-rhsi` (points at the Vault server and `rhsi` KV)
 - `ExternalSecret` `rhsi-link-token` (reads `site-b/link-token` from Vault)
@@ -157,10 +150,8 @@ The manifests under `rhsi/standby/` create the ESO integration:
 - A one‑shot `Job` `create-access-token-from-vault` (creates the Skupper
   `AccessToken` from the synced Secret)
 
-Apply the standby manifests on `site-b`:
 
 ```bash
-oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" apply -f rhsi/standby/
 ```
 
 You can confirm the `SecretStore` and `ExternalSecret` exist:
@@ -285,7 +276,6 @@ Now that `rhsi-link-token` exists on `site-b`, run the Job that creates the
 Skupper `AccessToken` object from that Secret.
 
 ```bash
-oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" apply -f rhsi/standby/80-job-create-access-token.yaml
 ```
 
 Wait for the Job to complete:
@@ -420,7 +410,6 @@ When you want to rotate the Skupper link credentials:
    oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" delete accesstoken standby-from-vault --ignore-not-found
    oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" delete job create-access-token-from-vault --ignore-not-found
 
-   oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" apply -f rhsi/standby/80-job-create-access-token.yaml
    ```
 
 5. Verify the Skupper link is still `Ready` (section 9).
