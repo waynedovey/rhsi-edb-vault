@@ -128,53 +128,6 @@ On each **managed cluster (site-a, site-b)**:
    grant URL on `site-a` (HTTPS).
 5. `skupper` CLI installed locally (optional but useful for debugging).
 
-6. Ensure the **OpenShift External Secrets Operator** is installed on each application
-   cluster (`site-a` and `site-b`) if you want to use the Vault-backed link example.
-   - In this lab, the hub Argo CD app `hub/20-app-rhsi-external-secrets-operator.yaml`
-     deploys the operator into each application cluster for you.
-   - If you are not using the Argo CD apps from this repo, you can install the operator
-     manually as shown below:
-
-   ```bash
-   oc new-project external-secrets-operator
-
-   cat << 'EOF' | oc apply -f -
-   apiVersion: operators.coreos.com/v1
-   kind: OperatorGroup
-   metadata:
-     name: openshift-external-secrets-operator
-     namespace: external-secrets-operator
-   spec:
-     targetNamespaces: []
-   ---
-   apiVersion: operators.coreos.com/v1alpha1
-   kind: Subscription
-   metadata:
-     name: openshift-external-secrets-operator
-     namespace: external-secrets-operator
-   spec:
-     channel: tech-preview-v0.1
-     name: openshift-external-secrets-operator
-     source: redhat-operators
-     sourceNamespace: openshift-marketplace
-     installPlanApproval: Automatic
-   ---
-   apiVersion: operator.openshift.io/v1alpha1
-   kind: ExternalSecrets
-   metadata:
-     name: cluster
-     labels:
-       app.kubernetes.io/name: external-secrets-operator
-   spec: {}
-   EOF
-   ```
-
-   That CR (`externalsecrets.operator.openshift.io/cluster`) turns on the
-   external-secrets.io controllers that are used by
-   `rhsi/standby/70-secretstore-vault-rhsi.yaml` and
-   `rhsi/standby/75-externalsecret-rhsi-link-token.yaml` to read the Skupper
-   link token from Vault.
-
 On your **laptop**:
 
 7. `oc` CLI with contexts for hub, `site-a`, and `site-b`.
@@ -344,7 +297,34 @@ do the following **once per standby cluster**.
 
 ---
 
-### ### 8.2 Store the Skupper grant in Vault
+### 8.2 Store the Skupper grant in Vault
+
+This step does two things:
+
+1. Ensure a KV v2 secrets engine is mounted at `rhsi/` (once per Vault environment).
+2. Store the Skupper grant for the standby site (`site-b`) under `rhsi/site-b/link-token`.
+
+> All of these commands should be run with a Vault admin/root token.
+
+#### 8.2.1 Enable the KV engine at `rhsi/` (one-time)
+
+If you haven’t already mounted a KV engine at `rhsi/`, do so now:
+
+```bash
+vault secrets list
+
+# If there is no "rhsi/" entry in the output above, enable it:
+vault secrets enable -path=rhsi kv-v2
+```
+
+You can sanity check with a test secret:
+
+```bash
+vault kv put rhsi/site-b/test foo=bar
+vault kv get rhsi/site-b/test
+```
+
+#### 8.2.2 Create and store the Skupper grant from site-a
 
 On **site-a** (primary), create a Skupper grant for the standby site using the
 `AccessGrant` CR from this repo:
@@ -391,7 +371,10 @@ oc --context "${CONTEXT_SITE_A}" -n "${GRANT_NS}"   get accessgrant "${GRANT_NAM
 Now store the grant in Vault at the expected path:
 
 ```bash
-vault kv put rhsi/site-b/link-token   code="$GRANT_CODE"   url="$GRANT_URL"   ca=@/tmp/skupper-grant-server-ca.pem
+vault kv put rhsi/site-b/link-token \
+  code="$GRANT_CODE" \
+  url="$GRANT_URL" \
+  ca=@/tmp/skupper-grant-server-ca.pem
 ```
 
 You can verify it later with:
