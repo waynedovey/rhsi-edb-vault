@@ -10,9 +10,6 @@ spec:
   template:
     metadata:
       name: create-access-token-from-vault
-      labels:
-        app.kubernetes.io/instance: rhsi-standby-site-b
-        job-name: create-access-token-from-vault
     spec:
       serviceAccountName: rhsi-vault-reader
       restartPolicy: Never
