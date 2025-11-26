@@ -344,28 +344,68 @@ do the following **once per standby cluster**.
 
 ---
 
-### 8.2 Store the Skupper grant in Vault
+### ### 8.2 Store the Skupper grant in Vault
 
-On **site-a** (primary), create a Skupper grant for the standby site using
-either the Skupper CLI or the `AccessGrant` CR (see the Skupper
-documentation for the exact commands).
+On **site-a** (primary), create a Skupper grant for the standby site using the
+`AccessGrant` CR from this repo:
 
-From the grant, you need three fields:
+```bash
+oc --context site-a -n rhsi apply -f rhsi/site-a/rhsi-standby-grant.yaml
+```
+
+Wait until the grant has its status fields populated:
+
+```bash
+oc --context site-a -n rhsi get accessgrant rhsi-standby-grant -o yaml
+```
+
+You should see `status.code`, `status.url`, and `status.ca` on the resource.
+
+From the grant, we need to extract three fields:
 
 * `code` – the grant code Skupper will redeem
 * `url` – the HTTPS URL of the grant server
 * `ca` – the PEM-encoded certificate for `SkupperGrantServerCA`
 
-Create a secret at the expected path in Vault:
+You can pull these values with:
 
 ```bash
-vault kv put rhsi/site-b/link-token   code="<grant-code-from-site-a>"   url="<grant-url-from-site-a>"   ca=@/path/to/skupper-grant-server-ca.pem
+export CONTEXT_SITE_A=site-a
+export GRANT_NS=rhsi
+export GRANT_NAME=rhsi-standby-grant
+
+# 1) Secret code Skupper will redeem
+GRANT_CODE=$(
+  oc --context "${CONTEXT_SITE_A}" -n "${GRANT_NS}"     get accessgrant "${GRANT_NAME}"     -o jsonpath='{.status.code}'
+)
+
+# 2) HTTPS URL of the grant server
+GRANT_URL=$(
+  oc --context "${CONTEXT_SITE_A}" -n "${GRANT_NS}"     get accessgrant "${GRANT_NAME}"     -o jsonpath='{.status.url}'
+)
+
+# 3) PEM-encoded SkupperGrantServerCA
+oc --context "${CONTEXT_SITE_A}" -n "${GRANT_NS}"   get accessgrant "${GRANT_NAME}"   -o jsonpath='{.status.ca}'   > /tmp/skupper-grant-server-ca.pem
+```
+
+Now store the grant in Vault at the expected path:
+
+```bash
+vault kv put rhsi/site-b/link-token   code="$GRANT_CODE"   url="$GRANT_URL"   ca=@/tmp/skupper-grant-server-ca.pem
 ```
 
 You can verify it later with:
 
 ```bash
 vault kv get rhsi/site-b/link-token
+```
+
+You should see the three keys:
+
+```text
+code: <grant-code-from-site-a>
+url:  <grant-url-from-site-a>
+ca:   -----BEGIN CERTIFICATE----- ...
 ```
 
 The example in this repo expects exactly that path
