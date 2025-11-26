@@ -590,3 +590,95 @@ This confirms:
 
 ![Architecture overview](docs/rhsi-edb-vault-architecture.png)
 
+## 9. Vault + External Secrets fix for Skupper link token on site-b
+
+This section documents the working configuration that allows the External Secrets Operator (ESO) on **site-b** to read the Skupper AccessToken grant from Vault and keep the Skupper link `standby-from-vault` in the **Ready** state.
+
+### 9.1 Summary of what changed
+
+- Added a dedicated Vault policy `rhsi-site-b-link-token` that grants read access only to the path `rhsi/data/site-b/link-token`.
+- Updated the Vault Kubernetes auth role `rhsi-site-b` to use that policy.
+- Verified that the `SecretStore` and `ExternalSecret` on site-b use the `rhsi-vault-reader` ServiceAccount and the `auth/kubernetes-site-b` auth method.
+- Documented how to test the Vault login flow using `oc create token` with the `rhsi-vault-reader` ServiceAccount.
+- Confirmed the end-to-end flow with `scripts/sanity-check-skupper-vault-link.sh`.
+
+### 9.2 Vault policy
+
+Create a small policy file (already included in this repo under `vault/policies/rhsi-site-b-link-token.hcl`):
+
+```hcl
+# Policy used by ESO on site-b to read the Skupper link token from Vault
+path "rhsi/data/site-b/link-token" {
+  capabilities = ["read"]
+}
+```
+
+Then load the policy into Vault:
+
+```bash
+vault policy write rhsi-site-b-link-token vault/policies/rhsi-site-b-link-token.hcl
+```
+
+### 9.3 Vault Kubernetes auth role
+
+Update the Kubernetes auth role for site-b so that tokens for the `rhsi-vault-reader` ServiceAccount get the new policy:
+
+```bash
+vault write auth/kubernetes-site-b/role/rhsi-site-b \
+  bound_service_account_names="rhsi-vault-reader" \
+  bound_service_account_namespaces="rhsi" \
+  policies="rhsi-site-b-link-token" \
+  ttl="1h"
+```
+
+You can confirm:
+
+```bash
+vault read auth/kubernetes-site-b/role/rhsi-site-b
+# ...
+# token_policies ["rhsi-site-b-link-token"]
+```
+
+### 9.4 Testing the login flow with \`oc create token\`
+
+On newer OpenShift releases you should use \`oc create token\` instead of reading the legacy ServiceAccount secret. From your workstation:
+
+```bash
+JWT=$(oc --context site-b -n rhsi create token rhsi-vault-reader)
+
+VAULT_TOKEN=$(vault write -format=json \
+  auth/kubernetes-site-b/login \
+  role="rhsi-site-b" \
+  jwt="$JWT" | jq -r '.auth.client_token')
+
+VAULT_TOKEN="$VAULT_TOKEN" vault kv get rhsi/site-b/link-token
+```
+
+You should see the `ca`, `code` and `url` fields that match the `AccessGrant` on site-a.
+
+### 9.5 Verifying end-to-end with the sanity check script
+
+Once Vault and ESO are configured, run:
+
+```bash
+SITE_A_CTX=site-a \
+SITE_B_CTX=site-b \
+NAMESPACE=rhsi \
+bash ./scripts/sanity-check-skupper-vault-link.sh
+```
+
+Expected output (abridged):
+
+```text
+[OK] Skupper link 'standby-from-vault' is Ready on site-b
+[OK] SecretStore vault-rhsi is Ready
+[OK] ExternalSecret rhsi-link-token is Ready (SecretSynced)
+[OK] AccessGrant.status.* matches Secret and Vault
+Sanity check PASSED
+```
+
+This confirms that:
+
+- Vault contains the Skupper link token for site-b.
+- ESO on site-b can read it via the Kubernetes auth role `rhsi-site-b`.
+- The Skupper link `standby-from-vault` is Ready and using the token from Vault.
