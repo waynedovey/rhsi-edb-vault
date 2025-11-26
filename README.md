@@ -80,41 +80,65 @@ This will hold the Skupper grant data under `rhsi/data/site-b/link-token`.
 
 ### 3.2 Configure Kubernetes auth for `site-b`
 
-1. Grab the cluster CA for `site-b`:
+We configure Vault’s Kubernetes auth backend for the **site-b** cluster using a
+dedicated reviewer ServiceAccount. This allows Vault to validate Kubernetes
+service account tokens and issue short‑lived Vault tokens for ESO.
+
+1. Create the reviewer `ServiceAccount` and grant it `system:auth-delegator`:
 
    ```bash
-   oc --context "${CONTEXT_SITE_B}" -n kube-public      get configmap kube-root-ca.crt      -o jsonpath='{.data.ca\.crt}' > /tmp/site-b-ca.crt
+   oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" create sa vault-auth || true
+
+   oc --context "${CONTEXT_SITE_B}" create clusterrolebinding vault-auth-delegator-site-b \
+     --clusterrole=system:auth-delegator \
+     --serviceaccount="${NS_RHSI}:vault-auth" 2>/dev/null || true
    ```
 
-2. Create a token for the `rhsi-vault-reader` service account on `site-b`:
+2. Create a classic service-account token Secret for `vault-auth` (OpenShift
+   will automatically populate the token and CA):
 
    ```bash
-   export REVIEWER_JWT=$(
-     oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}"        create token rhsi-vault-reader
+   cat <<'EOF' | oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" apply -f -
+   apiVersion: v1
+   kind: Secret
+   metadata:
+     name: vault-auth-token
+     annotations:
+       kubernetes.io/service-account.name: vault-auth
+   type: kubernetes.io/service-account-token
+   EOF
+   ```
+
+3. Extract the reviewer JWT, CA certificate and API URL for `site-b`:
+
+   ```bash
+   export VAULT_REVIEWER_JWT=$(
+     oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" get secret vault-auth-token \
+       -o jsonpath='{.data.token}' | base64 -d
    )
-   ```
 
-3. Enable a Kubernetes auth mount for `site-b`:
+   export KUBE_CA_CRT=$(
+     oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" get secret vault-auth-token \
+       -o jsonpath='{.data.ca\\.crt}' | base64 -d
+   )
 
-   ```bash
-   vault auth enable -path=kubernetes-site-b kubernetes
-   ```
-
-4. Capture the `site-b` API server URL and CA:
-
-   ```bash
    export KUBE_HOST=$(
-     oc --context "${CONTEXT_SITE_B}" config view --minify        -o jsonpath='{.clusters[0].cluster.server}'
+     oc --context "${CONTEXT_SITE_B}" config view --minify \
+       -o jsonpath='{.clusters[0].cluster.server}'
    )
-
-   export KUBE_CA_CRT=$(cat /tmp/site-b-ca.crt)
    ```
 
-5. Configure the Kubernetes auth backend:
+4. Configure the Kubernetes auth backend in Vault for `site-b`:
 
    ```bash
-   vault write auth/kubernetes-site-b/config      token_reviewer_jwt="$REVIEWER_JWT"      kubernetes_host="$KUBE_HOST"      kubernetes_ca_cert="$KUBE_CA_CRT"
+   vault write auth/kubernetes-site-b/config \
+     token_reviewer_jwt="$VAULT_REVIEWER_JWT" \
+     kubernetes_host="$KUBE_HOST" \
+     kubernetes_ca_cert="$KUBE_CA_CRT" \
+     disable_iss_validation=true
    ```
+
+---
 
 ### 3.3 Policy and role for `rhsi-vault-reader`
 
@@ -132,14 +156,38 @@ Create a Kubernetes auth role that binds the policy to the
 `rhsi-vault-reader` service account in the `rhsi` namespace:
 
 ```bash
-vault write auth/kubernetes-site-b/role/rhsi-site-b   bound_service_account_names="rhsi-vault-reader"   bound_service_account_namespaces="${NS_RHSI}"   token_policies="rhsi-site-b"   ttl="1h"
+vault write auth/kubernetes-site-b/role/rhsi-site-b \
+  bound_service_account_names="rhsi-vault-reader" \
+  bound_service_account_namespaces="${NS_RHSI}" \
+  token_policies="rhsi-site-b" \
+  token_ttl="1h" \
+  token_max_ttl="24h"
 ```
 
-> The `ttl` here is aligned with the `expirationWindow` of the Skupper
-> AccessGrant we’ll create in the next section.
+The `token_ttl` here controls how long the **Vault tokens** ESO uses will live.
+When they expire, ESO will simply log in again using the Kubernetes auth
+backend. Because the reviewer token (`vault-auth-token`) is long‑lived and has
+`system:auth-delegator`, these logins continue to work over time.
 
 ---
 
+### 3.4 Quick login smoke test (optional but recommended)
+
+You can verify that Vault + Kubernetes auth are wired correctly by logging in
+manually using the same service account ESO uses:
+
+```bash
+export JWT=$(
+  oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" create token rhsi-vault-reader
+)
+
+vault write auth/kubernetes-site-b/login \
+  role="rhsi-site-b" \
+  jwt="$JWT"
+```
+
+If this returns a token and policy list (no `403 permission denied`), your
+Kubernetes auth configuration for `site-b` is good.
 ## 4. External Secrets configuration on `site-b`
 
 The manifests under `rhsi/standby/` create the ESO integration (deployed via Argo CD):
@@ -416,3 +464,71 @@ When you want to rotate the Skupper link credentials:
 
 This gives you a repeatable, Vault‑backed rotation procedure without having
 to manually juggle Skupper tokens on the standby cluster.
+
+## 12. Cleanup / lab reset
+
+This section is **optional** and is mainly for tearing the demo down so you can
+re-run all of the steps from scratch.
+
+> ⚠️ If you are using ACM/Argo to manage this repo (the `hub/` manifests),
+> disable or delete the corresponding Argo CD Applications first, otherwise the
+> resources will be recreated as you delete them.
+
+### 12.1 Cleanup on `site-a` (primary)
+
+```bash
+# Delete demo namespaces (this removes Skupper + Postgres objects)
+oc --context "${CONTEXT_SITE_A}" delete ns db --ignore-not-found
+oc --context "${CONTEXT_SITE_A}" delete ns "${NS_RHSI}" --ignore-not-found
+```
+
+If you prefer a softer cleanup, you can instead just remove Skupper and
+Postgres objects and keep the namespaces:
+
+```bash
+oc --context "${CONTEXT_SITE_A}" -n "${NS_RHSI}" delete site,link,listener,connector,accesstoken --all --ignore-not-found
+oc --context "${CONTEXT_SITE_A}" -n db delete deploy,svc,secret,configmap --all --ignore-not-found
+```
+
+### 12.2 Cleanup on `site-b` (standby)
+
+```bash
+# Delete demo namespaces on site-b
+oc --context "${CONTEXT_SITE_B}" delete ns db --ignore-not-found
+oc --context "${CONTEXT_SITE_B}" delete ns "${NS_RHSI}" --ignore-not-found
+```
+
+Or, for a softer cleanup that leaves the namespaces:
+
+```bash
+oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" delete site,link,listener,connector,accesstoken,job,networkobserver --all --ignore-not-found
+oc --context "${CONTEXT_SITE_B}" -n db delete deploy,svc,secret,configmap --all --ignore-not-found
+```
+
+### 12.3 Cleanup in Vault
+
+If you want to remove just the Skupper link credentials for this demo:
+
+```bash
+# Remove the link-token data for site-b
+vault kv delete rhsi/site-b/link-token
+vault kv metadata delete rhsi/site-b
+```
+
+To remove the Kubernetes auth wiring and policy created in section 3:
+
+```bash
+vault delete auth/kubernetes-site-b/role/rhsi-site-b
+vault policy delete rhsi-site-b
+```
+
+If this lab is the only consumer of the `kubernetes-site-b` auth mount and the
+`rhsi/` KV path, you can also remove them entirely:
+
+```bash
+vault auth disable kubernetes-site-b
+vault secrets disable rhsi
+```
+
+You can now re-run the README from the top to recreate a fresh environment for
+testing.
