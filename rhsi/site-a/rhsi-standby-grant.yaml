@@ -9,5 +9,5 @@ spec:
   # Reference to the SkupperGrantServer deployed by the Skupper V2 operator
   securedAccess:
     name: skupper-grant-server
-  # Maximum number of tokens that can be created from this grant
-  uses: 100
+  # Maximum number of redemptions
+  redemptionsAllowed: 100
