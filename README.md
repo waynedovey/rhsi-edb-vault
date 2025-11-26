@@ -70,6 +70,13 @@ At this point you should see:
 All of the following `vault` commands are executed from wherever you have
 `vault` CLI access to your Vault server.
 
+Set your Vault endpoint and token (adjust as appropriate for non-lab environments):
+
+```bash
+export VAULT_ADDR="https://vault-vault.apps.acm.sandbox2745.opentlc.com"
+export VAULT_TOKEN="root"
+```
+
 ### 3.1 Enable KV v2 at `rhsi/`
 
 ```bash
