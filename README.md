@@ -73,74 +73,48 @@ All of the following `vault` commands are executed from wherever you have
 ### 3.1 Enable KV v2 at `rhsi/`
 
 ```bash
-vault secrets enable -path=rhsi kv-v2 || true
+vault secrets enable -path=rhsi kv-v2
 ```
 
 This will hold the Skupper grant data under `rhsi/data/site-b/link-token`.
 
 ### 3.2 Configure Kubernetes auth for `site-b`
 
-We configure Vault to trust JWTs issued by the **site-b** cluster and use a
-dedicated reviewer ServiceAccount (`vault-auth`) to call the Kubernetes
-TokenReview API.
-
-1. Create the `vault-auth` ServiceAccount and bind it to the
-   `system:auth-delegator` ClusterRole:
+1. Grab the cluster CA for `site-b`:
 
    ```bash
-   oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" create sa vault-auth || true
-
-   oc --context "${CONTEXT_SITE_B}" create clusterrolebinding vault-auth-delegator-site-b \
-     --clusterrole=system:auth-delegator \
-     --serviceaccount="${NS_RHSI}:vault-auth" 2>/dev/null || true
+   oc --context "${CONTEXT_SITE_B}" -n kube-public      get configmap kube-root-ca.crt      -o jsonpath='{.data.ca\.crt}' > /tmp/site-b-ca.crt
    ```
 
-2. Create a token Secret for `vault-auth`:
+2. Create a token for the `rhsi-vault-reader` service account on `site-b`:
 
    ```bash
-   cat <<'EOF' | oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" apply -f -
-   apiVersion: v1
-   kind: Secret
-   metadata:
-     name: vault-auth-token
-     annotations:
-       kubernetes.io/service-account.name: vault-auth
-   type: kubernetes.io/service-account-token
-   EOF
-   ```
-
-3. Extract the reviewer JWT and the cluster CA from the `vault-auth-token`
-   Secret, and capture the Kubernetes API URL:
-
-   ```bash
-   export VAULT_REVIEWER_JWT=$(
-     oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" get secret vault-auth-token \
-       -o jsonpath='{.data.token}' | base64 -d
+   export REVIEWER_JWT=$(
+     oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}"        create token rhsi-vault-reader
    )
+   ```
 
-   oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" \
-     get secret vault-auth-token \
-     -o jsonpath='{.data.ca\\.crt}' | base64 -d > /tmp/site-b-ca.crt
+3. Enable a Kubernetes auth mount for `site-b`:
 
+   ```bash
+   vault auth enable -path=kubernetes-site-b kubernetes
+   ```
+
+4. Capture the `site-b` API server URL and CA:
+
+   ```bash
    export KUBE_HOST=$(
-     oc --context "${CONTEXT_SITE_B}" config view --minify \
-       -o jsonpath='{.clusters[0].cluster.server}'
+     oc --context "${CONTEXT_SITE_B}" config view --minify        -o jsonpath='{.clusters[0].cluster.server}'
    )
+
+   export KUBE_CA_CRT=$(cat /tmp/site-b-ca.crt)
    ```
 
-4. Configure the Kubernetes auth backend in Vault:
+5. Configure the Kubernetes auth backend:
 
    ```bash
-   vault auth enable -path=kubernetes-site-b kubernetes || true
-
-   vault write auth/kubernetes-site-b/config \
-     token_reviewer_jwt="$VAULT_REVIEWER_JWT" \
-     kubernetes_host="$KUBE_HOST" \
-     kubernetes_ca_cert=@/tmp/site-b-ca.crt \
-     disable_iss_validation=true
+   vault write auth/kubernetes-site-b/config      token_reviewer_jwt="$REVIEWER_JWT"      kubernetes_host="$KUBE_HOST"      kubernetes_ca_cert="$KUBE_CA_CRT"
    ```
-
----
 
 ### 3.3 Policy and role for `rhsi-vault-reader`
 
@@ -155,71 +129,17 @@ EOF
 ```
 
 Create a Kubernetes auth role that binds the policy to the
-`rhsi-vault-reader` ServiceAccount in the `rhsi` namespace:
+`rhsi-vault-reader` service account in the `rhsi` namespace:
 
 ```bash
-vault write auth/kubernetes-site-b/role/rhsi-site-b \
-  bound_service_account_names="rhsi-vault-reader" \
-  bound_service_account_namespaces="${NS_RHSI}" \
-  token_policies="rhsi-site-b" \
-  token_ttl="1h" \
-  token_max_ttl="24h"
+vault write auth/kubernetes-site-b/role/rhsi-site-b   bound_service_account_names="rhsi-vault-reader"   bound_service_account_namespaces="${NS_RHSI}"   token_policies="rhsi-site-b"   ttl="1h"
 ```
 
-> The `token_ttl` here is aligned with the `expirationWindow` of the Skupper
+> The `ttl` here is aligned with the `expirationWindow` of the Skupper
 > AccessGrant we’ll create in the next section.
 
 ---
 
-### 3.4 Validation
-
-Before wiring ESO into Vault, validate that the Kubernetes auth flow
-works end-to-end.
-
-1. **Check that Vault can call TokenReview via `vault-auth`:**
-
-   ```bash
-   oc --context "${CONTEXT_SITE_B}" auth can-i \
-     create tokenreviews.authentication.k8s.io \
-     --as=system:serviceaccount:${NS_RHSI}:vault-auth
-   ```
-
-   You should see:
-
-   ```text
-   yes
-   ```
-
-2. **Login to Vault using the `rhsi-vault-reader` ServiceAccount token:**
-
-   ```bash
-   export JWT=$(
-     oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" create token rhsi-vault-reader
-   )
-
-   vault write auth/kubernetes-site-b/login \
-     role="rhsi-site-b" \
-     jwt="$JWT"
-   ```
-
-   Expected output (abridged):
-
-   ```text
-   Key                                       Value
-   ---                                       -----
-   token                                     hvs....
-   token_policies                            ["default" "rhsi-site-b"]
-   token_meta_service_account_name           rhsi-vault-reader
-   token_meta_service_account_namespace      rhsi
-   ```
-
-   If you see `403 permission denied`, double-check:
-
-   - `kubernetes_ca_cert` is present in `vault read auth/kubernetes-site-b/config`
-   - The `VAULT_REVIEWER_JWT` and `KUBE_HOST` values are from the **site-b**
-     cluster
-   - The `rhsi-vault-reader` ServiceAccount name/namespace match the role
-     bindings above.
 ## 4. External Secrets configuration on `site-b`
 
 The manifests under `rhsi/standby/` create the ESO integration (deployed via Argo CD):
@@ -230,11 +150,8 @@ The manifests under `rhsi/standby/` create the ESO integration (deployed via Arg
 - A one‑shot `Job` `create-access-token-from-vault` (creates the Skupper
   `AccessToken` from the synced Secret)
 
-If you are **not** using Argo CD and want to apply the `site-b` manifests
-manually, you can do:
 
 ```bash
-oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" apply -f rhsi/standby/
 ```
 
 You can confirm the `SecretStore` and `ExternalSecret` exist:
@@ -358,10 +275,7 @@ The decoded `code` and `url` should match the AccessGrant on `site-a`.
 Now that `rhsi-link-token` exists on `site-b`, run the Job that creates the
 Skupper `AccessToken` object from that Secret.
 
-If the Job is not already created by Argo CD, apply it manually:
-
 ```bash
-oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" apply -f rhsi/standby/create-access-token-from-vault.yaml
 ```
 
 Wait for the Job to complete:
