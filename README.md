@@ -1,70 +1,75 @@
-# RHSI EDB + Vault + Skupper AccessGrant Automation
+# RHSI EDB Vault + Skupper AccessGrant Automation
 
-This repo demonstrates how to automatically manage **Skupper link tokens** between
-a **primary (site-a)** and **standby (site-b)** OpenShift cluster using:
+This repo demonstrates how to:
+- Store a **Skupper AccessGrant** (code / URL / CA) in **HashiCorp Vault** on the ACM / site‑a cluster.
+- Sync that grant into the **site‑b** OpenShift cluster using **External Secrets Operator (ESO)**.
+- Materialise it as a **Skupper AccessToken** and **Link** on site‑b for Postgres replication.
 
-- **Skupper AccessGrant / AccessToken**
-- **HashiCorp Vault** (KV v2)
-- **External Secrets Operator (ESO)** on site-b
-- A **Job** on site-b to convert Vault data into a Skupper `AccessToken`
-
-The end result is:
-
-- On **site-a**, the Skupper **AccessGrant** details (code / URL / CA) for site-b
-  are stored under a **Vault KV path**.
-- On **site-b**, ESO reads that Vault KV entry and creates a **Kubernetes Secret**
-  (`rhsi-link-token`).
-- A Job on **site-b** converts that Secret into a Skupper **AccessToken** resource
-  (`standby-from-vault`), which backs a **Skupper Link**.
-- The link becomes **Ready**, and Postgres replication works across Skupper.
+The final, working design uses **Vault Kubernetes auth** from site‑b and **does not rely on any long‑lived Vault token** in Kubernetes.
 
 ---
 
-## 1. Prerequisites
+## 1. High‑Level Flow
 
-You will need:
+Site‑a (primary) → Vault → Site‑b (standby):
+
+1. **Skupper AccessGrant on site‑a** is created for the `rhsi` site (primary).
+2. A script / job on site‑a writes the grant fields into Vault KV v2 at:
+
+   ```text
+   rhsi/site-b/link-token
+   ```
+
+   with keys:
+   - `code` – AccessGrant code
+   - `url`  – AccessGrant URL
+   - `ca`   – PEM CA for the Skupper grant server
+
+3. On **site‑b**:
+   - **External Secrets Operator** uses **Kubernetes auth** to log into Vault via a `SecretStore`.
+   - An **ExternalSecret** (`rhsi-link-token`) pulls `code`, `url`, and `ca` from Vault.
+   - A **Job** (`create-access-token-from-vault`) reads `rhsi-link-token` and creates / updates a **Skupper AccessToken** (`standby-from-vault`).
+   - Skupper uses this AccessToken to create a **Link** to the primary (`rhsi-primary`).
+
+4. Postgres replication over Skupper is validated with a simple `skupper_test` table.
+
+---
+
+## 2. Prerequisites
 
 - Two OpenShift clusters:
-  - **site-a** (primary)
-  - **site-b** (standby)
-- A common namespace on both clusters, e.g.:
+  - **site‑a**: ACM hub + Vault + Skupper (primary) + Postgres primary.
+  - **site‑b**: Skupper (standby) + Postgres standby.
+- `oc` / `kubectl` configured with contexts:
+  - `CONTEXT_SITE_A`
+  - `CONTEXT_SITE_B`
+- Namespace for this demo on both clusters:
 
   ```bash
   export NS_RHSI="rhsi"
   ```
 
-- Working `oc`, `kubectl`, `skupper` and `vault` CLIs.
-- External Secrets Operator installed on **site-b**.
-- HashiCorp Vault reachable from **site-b** (the cluster where ESO runs).
+- Vault is exposed via OpenShift Route, for example:
 
-Recommended shell variables:
-
-```bash
-# kubecontexts
-export CONTEXT_SITE_A="site-a"
-export CONTEXT_SITE_B="site-b"
-
-# namespace
-export NS_RHSI="rhsi"
-
-# Vault
-export VAULT_ADDR="https://vault-vault.apps.acm.sandbox2745.opentlc.com"
-export VAULT_TOKEN="root"   # or an appropriately scoped token
-```
-
-> Adjust the values above to match your environment.
+  ```text
+  https://vault-vault.apps.acm.sandbox2745.opentlc.com
+  ```
 
 ---
 
-## 2. Vault Kubernetes Auth (site-b)
+## 3. Vault Setup (ACM / Site‑a)
 
-We use **Kubernetes auth** for ESO to authenticate to Vault from **site-b**,
-rather than a static token.
+> You only do this once per site‑b cluster.
 
-### 2.1. Configure Vault Kubernetes auth
+### 3.1 Enable Kubernetes auth for site‑b
 
-In Vault (once, from your admin shell), configure the `kubernetes-site-b` auth
-mount and role (example only, adapt as required):
+Run these **inside a Vault pod** (so that `/var/run/secrets/...` exists). Example:
+
+```bash
+oc --context "${CONTEXT_SITE_A}" -n vault exec -it deploy/vault -- sh
+```
+
+Inside the pod:
 
 ```bash
 vault auth enable -path=kubernetes-site-b kubernetes || true
@@ -74,67 +79,127 @@ vault write auth/kubernetes-site-b/config   token_reviewer_jwt=@/var/run/secrets
 vault write auth/kubernetes-site-b/role/rhsi-site-b   bound_service_account_names="rhsi-vault-reader"   bound_service_account_namespaces="rhsi"   policies="rhsi-site-b"   token_ttl="1h"   token_max_ttl="24h"
 ```
 
-Verify the Vault role:
+> **Important:** The above must *not* be run on your laptop with `@/var/run/...` – that path only exists inside a pod.
 
-```bash
-vault read auth/kubernetes-site-b/role/rhsi-site-b
+### 3.2 Vault policy for site‑b
+
+Create or update a policy `rhsi-site-b` that allows ESO to read the Skupper link token:
+
+```hcl
+# policy: rhsi-site-b
+path "rhsi/data/site-b/*" {
+  capabilities = ["read", "list"]
+}
 ```
 
-You should see:
+Attach this policy to the `rhsi-site-b` Kubernetes auth role (done above).
 
-- `bound_service_account_names` includes `rhsi-vault-reader`
-- `bound_service_account_namespaces` includes `rhsi`
-- `token_policies` includes `rhsi-site-b`
+### 3.3 Populate the Skupper link token into Vault
 
-### 2.2. ServiceAccount on site-b
-
-On the **site-b** cluster in the `rhsi` namespace, create the
-`rhsi-vault-reader` ServiceAccount and bind it with a suitable Role/ClusterRole
-(as defined in your repo manifests). For example:
+Your AccessGrant → Vault pipeline (script / job) should end up with a secret like this:
 
 ```bash
-oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" get sa rhsi-vault-reader
+vault kv get rhsi/site-b/link-token
 ```
 
-Make sure this ServiceAccount name matches the one in the Vault role above.
+Example output:
 
-### 2.3. CA Secret for Vault (`vault-ca`)
+```text
+==== Data ====
+Key   Value
+---   -----
+ca    -----BEGIN CERTIFICATE-----
+      MIIDKjCCAhKgAwIBAgIRAIBt1BRPBhO+oChmZprsM5cw...
+      -----END CERTIFICATE-----
+code  pvzEkIzVHTFHhPFhU7COJjKc
+url   https://skupper-grant-server-https-openshift-operators.apps.site-a.sandbox2745.opentlc.com:443/8365410c-39f1-40bd-a2f4-75ba9536c730
+```
 
-On **site-b**, create a Secret containing the CA used by Vault’s TLS endpoint.
+As long as this path exists and is readable by policy `rhsi-site-b`, ESO on site‑b can pull it.
 
-Example (using the `router-certs-default` cert from `openshift-ingress`):
+---
+
+## 4. Site‑b Setup: Namespace, SA and RBAC
+
+On **site‑b**:
 
 ```bash
-# Export the OpenShift router cert for Vault (site-b)
+oc --context "${CONTEXT_SITE_B}" create ns "${NS_RHSI}" || true
+```
+
+Apply the service account and RBAC that ESO will impersonate when calling Vault, for example:
+
+```bash
+oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" apply -f rhsi/standby/rhsi-vault-reader.yaml
+```
+
+Typical `rhsi-vault-reader` definition:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rhsi-vault-reader
+  namespace: rhsi
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rhsi-vault-reader
+  namespace: rhsi
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rhsi-vault-reader
+  namespace: rhsi
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: rhsi-vault-reader
+subjects:
+  - kind: ServiceAccount
+    name: rhsi-vault-reader
+    namespace: rhsi
+```
+
+> ESO itself runs in its own namespace (`external-secrets`) and uses this ServiceAccount via `SecretStore.spec.provider.vault.auth.kubernetes.serviceAccountRef`.
+
+---
+
+## 5. Site‑b: Trust the Vault Route CA
+
+The SecretStore expects a secret called `vault-ca` in the `rhsi` namespace with key `caCert` containing the CA that signed the Vault route.
+
+On **site‑b**:
+
+```bash
+# Extract the router certificate used by the Vault route
 oc --context "${CONTEXT_SITE_B}" -n openshift-ingress   get secret router-certs-default   -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/vault-ca.pem
 
-# Recreate the vault-ca Secret in rhsi
+# (Re)create the CA secret in rhsi
 oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" delete secret vault-ca --ignore-not-found
 
 oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" create secret generic vault-ca   --from-file=caCert=/tmp/vault-ca.pem
 ```
 
-You should see:
+Verify:
 
 ```bash
 oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" get secret vault-ca -o yaml
 ```
 
-with:
-
-```yaml
-data:
-  caCert: <base64-encoded PEM>
-```
-
 ---
 
-## 3. SecretStore for Vault on site-b
+## 6. Site‑b: SecretStore and ExternalSecret
 
-Create a `SecretStore` on **site-b** that uses Kubernetes auth and the `vault-ca`
-Secret.
+### 6.1 SecretStore pointing to Vault
 
-Example YAML (make sure this matches your repo manifest):
+`rhsi/standby/vault-secretstore-site-b.yaml`:
 
 ```yaml
 apiVersion: external-secrets.io/v1beta1
@@ -151,9 +216,9 @@ spec:
       path: rhsi
       version: v2
       caProvider:
+        type: Secret
         name: vault-ca
         key: caCert
-        type: Secret
       auth:
         kubernetes:
           mountPath: kubernetes-site-b
@@ -162,68 +227,35 @@ spec:
             name: rhsi-vault-reader
 ```
 
-Apply it:
+Apply and verify:
 
 ```bash
-oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" apply -f <PATH-TO>/vault-secretstore-site-b.yaml
-```
+oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" apply -f rhsi/standby/vault-secretstore-site-b.yaml
 
-Verify the SecretStore:
-
-```bash
 oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" describe secretstore vault-rhsi
 ```
 
-Expected:
-
-- `Status: True`
-- `Reason: Valid`
-- `Message: store validated`
-
-If you previously used **token-based auth** (`vault-token` Secret), that can
-now be removed from the README and from your manifests – it is no longer needed.
-
----
-
-## 4. Vault KV entry for Skupper AccessGrant
-
-On **site-a**, the Skupper Grant Server issues an AccessGrant for site-b. A
-separate Job/CronJob (in this repo) populates Vault with:
-
-- `code`
-- `url`
-- `ca`
-
-under the KV path: `rhsi/site-b/link-token` (Vault KV v2).
-
-Verify from your Vault shell:
-
-```bash
-vault kv get rhsi/site-b/link-token
-```
-
-Example output:
+You should see:
 
 ```text
-==== Data ====
-Key     Value
----     -----
-ca      -----BEGIN CERTIFICATE-----
-        MIIDKjCCAhKgAwIBAgIRAIBt1BRPBhO+oChmZprsM5cwDQYJKoZIhvcNAQELBQAw
-        ...
-        -----END CERTIFICATE-----
-code    pvzEkIzVHTFHhPFhU7COJjKc
-url     https://skupper-grant-server-https-openshift-operators.apps.site-a.sandbox2745.opentlc.com:443/8365410c-39f1-40bd-a2f4-75ba9536c730
+Status:
+  Capabilities: ReadWrite
+  Conditions:
+    Type:     Ready
+    Status:   True
+    Reason:   Valid
+    Message:  store validated
 ```
 
----
+If you see 403 errors like `unable to log in with Kubernetes auth`, re‑check:
+- Vault role `rhsi-site-b` (bound SA and namespace)
+- `mountPath` (`kubernetes-site-b`)
+- Policy `rhsi-site-b` permissions on `rhsi/data/site-b/*`
+- `vault-ca` secret contents
 
-## 5. ExternalSecret on site-b (`rhsi-link-token`)
+### 6.2 ExternalSecret pulling the link token
 
-On **site-b**, use ESO to pull the `link-token` data from Vault into a
-Kubernetes Secret.
-
-Example ExternalSecret:
+`rhsi/standby/rhsi-link-token.yaml`:
 
 ```yaml
 apiVersion: external-secrets.io/v1beta1
@@ -236,35 +268,26 @@ metadata:
 spec:
   refreshInterval: 5m
   secretStoreRef:
-    kind: SecretStore
     name: vault-rhsi
+    kind: SecretStore
   dataFrom:
     - extract:
         key: site-b/link-token
-        conversionStrategy: Default
-        decodingStrategy: None
-        metadataPolicy: None
   target:
     name: rhsi-link-token
     creationPolicy: Owner
     deletionPolicy: Retain
 ```
 
-Apply it:
+Apply and verify:
 
 ```bash
-oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" apply -f <PATH-TO>/externalsecret-rhsi-link-token.yaml
-```
+oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" apply -f rhsi/standby/rhsi-link-token.yaml
 
-Optionally force a reconcile:
+# Wait for the secret to be created / updated
+oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" get secret rhsi-link-token -o yaml
 
-```bash
-oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" annotate externalsecret rhsi-link-token   reconcile.external-secrets.io/requestedAt="$(date -Iseconds)" --overwrite
-```
-
-Check the Secret content from the cluster side:
-
-```bash
+# Decode to validate
 oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" get secret rhsi-link-token   -o jsonpath='{.data.code}' | base64 -d; echo
 
 oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" get secret rhsi-link-token   -o jsonpath='{.data.url}' | base64 -d; echo
@@ -272,32 +295,87 @@ oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" get secret rhsi-link-token   -o
 oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" get secret rhsi-link-token   -o jsonpath='{.data.ca}' | base64 -d | head
 ```
 
-These values should **match** what you see in Vault at `rhsi/site-b/link-token`.
+Example output:
+
+```text
+pvzEkIzVHTFHhPFhU7COJjKc
+https://skupper-grant-server-https-openshift-operators.apps.site-a.sandbox2745.opentlc.com:443/8365410c-39f1-40bd-a2f4-75ba9536c730
+-----BEGIN CERTIFICATE-----
+MIIDKjCCAhKgAwIBAgIRAIBt1BRPBhO+oChmZprsM5cw...
+```
+
+At this point ESO is successfully pulling the grant from Vault.
 
 ---
 
-## 6. Create Skupper AccessToken from Vault data (site-b)
+## 7. Site‑b: Create AccessToken from rhsi‑link‑token
 
-On **site-b**, a Job converts the `rhsi-link-token` Secret into a Skupper
-`AccessToken` resource called `standby-from-vault`.
+We use a **Job** that:
+- Waits for the `rhsi-link-token` Secret to exist.
+- Reads `code`, `url`, `ca` from the Secret.
+- Creates or updates a Skupper `AccessToken` named `standby-from-vault`.
 
-Example usage:
+Manifest: `rhsi/standby/create-access-token-from-vault.yaml` (simplified):
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-access-token-from-vault
+  namespace: rhsi
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: skupper-service-account
+      containers:
+        - name: create-access-token-from-vault
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -euo pipefail
+
+              echo "Waiting for Secret rhsi-link-token to exist..."
+              while ! kubectl get secret rhsi-link-token >/dev/null 2>&1; do
+                sleep 5
+              done
+
+              echo "Secret rhsi-link-token found."
+              CODE=$(kubectl get secret rhsi-link-token -o jsonpath='{.data.code}' | base64 -d)
+              URL=$(kubectl get secret rhsi-link-token -o jsonpath='{.data.url}' | base64 -d)
+              CA=$(kubectl get secret rhsi-link-token  -o jsonpath='{.data.ca}'  | base64 -d)
+
+              echo "Creating AccessToken standby-from-vault..."
+              cat <<EOF | kubectl apply -f -
+              apiVersion: skupper.io/v2alpha1
+              kind: AccessToken
+              metadata:
+                name: standby-from-vault
+                namespace: rhsi
+              spec:
+                code: ${CODE}
+                url: ${URL}
+                ca: |
+              $(echo "${CA}" | sed 's/^/    /')
+              EOF
+
+              echo "AccessToken standby-from-vault created/updated."
+```
+
+Run the job on **site‑b**:
 
 ```bash
-# Clean up any previous Job run
 oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" delete job create-access-token-from-vault --ignore-not-found
 
-# Apply the Job manifest
-oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" apply -f <PATH-TO>/create-access-token-from-vault.yaml
+oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" apply -f rhsi/standby/create-access-token-from-vault.yaml
 
-# Wait for job completion
 oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" wait   --for=condition=Complete   --timeout=120s   job/create-access-token-from-vault
 
-# Check logs
 oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" logs job/create-access-token-from-vault
 ```
 
-Example log output:
+Example log:
 
 ```text
 Waiting for Secret rhsi-link-token to exist...
@@ -308,52 +386,17 @@ accesstoken.skupper.io/standby-from-vault unchanged
 AccessToken standby-from-vault created/updated.
 ```
 
-You can then inspect the AccessToken:
+Verify the AccessToken and Link:
 
 ```bash
 oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" get accesstoken standby-from-vault -o yaml
-```
 
-Expected fields (truncated):
-
-```yaml
-apiVersion: skupper.io/v2alpha1
-kind: AccessToken
-metadata:
-  name: standby-from-vault
-  namespace: rhsi
-spec:
-  ca: |
-    -----BEGIN CERTIFICATE-----
-    ...
-    -----END CERTIFICATE-----
-  code: pvzEkIzVHTFHhPFhU7COJjKc
-  url: https://skupper-grant-server-https-openshift-operators.apps.site-a.sandbox2745.opentlc.com:443/8365410c-39f1-40bd-a2f4-75ba9536c730
-status:
-  status: Ready
-  redeemed: true
-  conditions:
-    - type: Redeemed
-      status: "True"
-      reason: Ready
-      message: OK
-```
-
----
-
-## 7. Verify Skupper link and Postgres
-
-### 7.1. Skupper link status
-
-Check the Skupper link on **site-b**:
-
-```bash
 oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" get link
 
 skupper --context "${CONTEXT_SITE_B}" --namespace "${NS_RHSI}" link status
 ```
 
-Expected:
+Example:
 
 ```text
 NAME                 STATUS   REMOTE SITE    MESSAGE
@@ -363,14 +406,21 @@ NAME                  STATUS  COST  MESSAGE
 standby-from-vault    Ready   0     OK
 ```
 
-### 7.2. Postgres test
+> **Rotation:** whenever the grant in Vault changes (new `code` / `url` / `ca`), rerun the `create-access-token-from-vault` Job, or convert it to a `CronJob` for automatic periodic rotation.
 
-From the `postgres-standby` deployment on **site-b**, connect to the primary
-via Skupper and run a simple test:
+---
+
+## 8. Postgres Replication Sanity Test
+
+From the **standby** pod on site‑b:
 
 ```bash
 oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" exec -it deploy/postgres-standby -- bash
+```
 
+Inside the pod:
+
+```bash
 export PGPASSWORD='supersecret'
 
 psql   -h postgres-primary   -p 5432   -U appuser   -d postgres << 'SQL'
@@ -401,48 +451,16 @@ INSERT 0 1
 ```
 
 This confirms:
-
-- The Skupper link is working end-to-end.
-- Postgres standby on **site-b** can connect to the primary via Skupper.
-- The AccessToken derived from Vault (`standby-from-vault`) is valid.
-
----
-
-## 8. Clean-up and rotation notes
-
-- The **Vault KV entry** can be rotated by re-running the AccessGrant Job/CronJob
-  on **site-a** that refreshes `rhsi/site-b/link-token`.
-- ESO will pick up the new values and update `rhsi-link-token` on **site-b**.
-- Re-running the `create-access-token-from-vault` Job will update the
-  `AccessToken` `standby-from-vault` and refresh the link.
-
-To clean up everything on **site-b**:
-
-```bash
-oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" delete accesstoken standby-from-vault --ignore-not-found
-oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" delete externalsecret rhsi-link-token --ignore-not-found
-oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" delete secretstore vault-rhsi --ignore-not-found
-oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" delete secret vault-ca --ignore-not-found
-```
-
-> Note: do **not** delete the Vault KV data if you still want the link to be
-> automatically recreated in the future.
+- Skupper link is working between site‑b and site‑a.
+- Postgres standby can reach the primary via Skupper.
+- The AccessGrant → Vault → ESO → AccessToken pipeline is functioning end‑to‑end.
 
 ---
 
-## 9. What changed from earlier versions?
+## 9. Notes and Gotchas
 
-Compared to earlier iterations of this lab:
-
-- **Removed** use of a static `vault-token` Secret for ESO.
-- **Switched** to **Kubernetes auth** for Vault using `rhsi-vault-reader` and
-  the `kubernetes-site-b` auth mount.
-- **Clarified** the CA setup via the `vault-ca` Secret (`caCert` key).
-- **Documented** the end-to-end verification flow for:
-  - `rhsi-link-token` Secret
-  - `standby-from-vault` AccessToken
-  - Skupper link status
-  - Postgres connectivity via Skupper.
-
-This README reflects the **known-good** configuration from the latest working
-run.
+- **No long‑lived Vault token:** the design intentionally uses Kubernetes auth instead of a static `vault-token` Secret.
+- **Run Vault config inside a pod:** commands referencing `@/var/run/secrets/...` must be executed inside a Vault pod, not from your laptop.
+- **SecretStore readiness:** if `SecretStore` is not `Ready`, check ESO logs in the `external-secrets` namespace and Vault audit logs.
+- **TLS issues:** if you see certificate errors, re‑create the `vault-ca` secret using the correct router or custom CA used by the Vault route.
+- **Rotation:** use a `CronJob` wrapper around the `create-access-token-from-vault` logic if you want fully hands‑off token rotation.
