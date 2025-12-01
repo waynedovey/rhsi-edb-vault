@@ -3,3 +3,9 @@ kind: Site
 metadata:
   name: rhsi-standby
   namespace: rhsi
+spec:
+  linkAccess:
+    tokens:
+      - name: rhsi-standby-token
+  ingress:
+    type: route

@@ -1,0 +1,29 @@
+%% RHSI + EDB + Vault + ESO (Option A)
+flowchart TD
+  Vault[(Vault\nKV v2: rhsi/)]
+  ACM[ACM / Hub Cluster]
+
+  subgraph SiteA[Site A / Primary]
+    A_OCP[OCP Cluster]
+    A_EDB[EDB Primary Cluster]
+    A_Skupper[Skupper Site]
+  end
+
+  subgraph SiteB[Site B / Standby]
+    B_OCP[OCP Cluster]
+    B_EDB[EDB Standby Cluster]
+    B_Skupper[Skupper Site]
+    B_ESO[External Secrets Operator]
+  end
+
+  ACM --> Vault
+  ACM --> SiteA
+  ACM --> SiteB
+
+  Vault -->|rhsi/site-b/link-token\n& rhsi/edb-repos2| B_ESO
+  B_ESO -->|rhsi-link-token\n& edb-repos2-token| B_OCP
+
+  A_Skupper <-->|Skupper Link\n(AccessGrant / AccessToken)| B_Skupper
+
+  A_EDB <-.- B_EDB
+  B_EDB -->|logical replication\n(read-only)| A_EDB

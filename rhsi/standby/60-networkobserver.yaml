@@ -1,6 +1,15 @@
-apiVersion: observability.skupper.io/v2alpha1
+apiVersion: observability.skupper.io/v1alpha1
 kind: NetworkObserver
 metadata:
   name: networkobserver
   namespace: rhsi
-spec: {}
+spec:
+  site:
+    name: rhsi-standby
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"

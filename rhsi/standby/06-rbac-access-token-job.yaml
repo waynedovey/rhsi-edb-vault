@@ -4,23 +4,20 @@ metadata:
   name: rhsi-access-token-job
   namespace: rhsi
 rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["skupper.io"]
-    resources: ["accesstokens"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: rhsi-access-token-job
   namespace: rhsi
+subjects:
+- kind: ServiceAccount
+  name: rhsi-vault-reader
+  namespace: rhsi
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: rhsi-access-token-job
-subjects:
-  - kind: ServiceAccount
-    name: rhsi-vault-reader
-    namespace: rhsi
