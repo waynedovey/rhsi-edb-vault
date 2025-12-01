@@ -1,9 +1,7 @@
-# RHSi Postgres Skupper Link via Vault + External Secrets
+# RHSi EDB Postgres Skupper Link via Vault + External Secrets
 
-> **Note:** This repo has been updated to use **EDB CloudNativePG** as the
-> canonical PostgreSQL implementation. The older Bitnami PostgreSQL demo
-> manifests have been removed from `rhsi/site-a/db-primary` and
-> `rhsi/site-b/db-standby`. All data‑plane examples should now be treated
+> **Note:** This repo uses **EDB CloudNativePG** as the canonical
+> PostgreSQL implementation. All data‑plane examples should be treated
 > as EDB‑backed, and the manifests under `rhsi/site-a/db-edb` and
 > `rhsi/site-b/db-edb` are the source of truth.
 
@@ -406,7 +404,6 @@ At this point the Skupper link is operational and traffic from `site-b`
 to the EDB cluster on `site-a` (`edb-site-a`) is flowing over the
 Skupper network.
 
-
 ## 11. Rotating the link credentials
 
 When you want to rotate the Skupper link credentials:
@@ -586,20 +583,24 @@ Example: write on **site-a**, read on **site-b**:
 
 ```bash
 # Insert on site-a
-oc --context "${CONTEXT_SITE_A}" -n db exec -it deploy/edb-site-a-rw --   bash -c 'psql -U postgres -d postgres -c "INSERT INTO site_a_data (payload) VALUES (''from-site-a'');"'
+oc --context "${CONTEXT_SITE_A}" -n db exec -it deploy/edb-site-a-rw -- \
+  bash -c 'psql -U postgres -d postgres -c "INSERT INTO site_a_data (payload) VALUES (''from-site-a'');"'
 
 # Read from site-b
-oc --context "${CONTEXT_SITE_B}" -n db exec -it deploy/edb-site-b-rw --   bash -c 'psql -U postgres -d postgres -c "SELECT * FROM site_a_data ORDER BY id DESC LIMIT 5;"'
+oc --context "${CONTEXT_SITE_B}" -n db exec -it deploy/edb-site-b-rw -- \
+  bash -c 'psql -U postgres -d postgres -c "SELECT * FROM site_a_data ORDER BY id DESC LIMIT 5;"'
 ```
 
 And the reverse for `site_b_data`:
 
 ```bash
 # Insert on site-b
-oc --context "${CONTEXT_SITE_B}" -n db exec -it deploy/edb-site-b-rw --   bash -c 'psql -U postgres -d postgres -c "INSERT INTO site_b_data (payload) VALUES (''from-site-b'');"'
+oc --context "${CONTEXT_SITE_B}" -n db exec -it deploy/edb-site-b-rw -- \
+  bash -c 'psql -U postgres -d postgres -c "INSERT INTO site_b_data (payload) VALUES (''from-site-b'');"'
 
 # Read from site-a
-oc --context "${CONTEXT_SITE_A}" -n db exec -it deploy/edb-site-a-rw --   bash -c 'psql -U postgres -d postgres -c "SELECT * FROM site_b_data ORDER BY id DESC LIMIT 5;"'
+oc --context "${CONTEXT_SITE_A}" -n db exec -it deploy/edb-site-a-rw -- \
+  bash -c 'psql -U postgres -d postgres -c "SELECT * FROM site_b_data ORDER BY id DESC LIMIT 5;"'
 ```
 
 If you see rows flowing in both directions, your EDB two-way replication over
