@@ -28,11 +28,10 @@ spec:
       max_replication_slots: "10"
       max_wal_senders: "10"
 
-  # External reference to the remote site-a cluster, reached via Skupper
   externalClusters:
     - name: site-a
       connectionParameters:
-        host: pg-site-a.rhsi.svc.cluster.local
+        host: edb-site-a.rhsi.svc.cluster.local
         user: postgres
         dbname: postgres
       password:

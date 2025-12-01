@@ -1,5 +1,12 @@
 # RHSi Postgres Skupper Link via Vault + External Secrets
 
+> **Note:** This repo has been updated to use **EDB CloudNativePG** as the
+> canonical PostgreSQL implementation. The older Bitnami PostgreSQL demo
+> manifests have been removed from `rhsi/site-a/db-primary` and
+> `rhsi/site-b/db-standby`. All data‑plane examples should now be treated
+> as EDB‑backed, and the manifests under `rhsi/site-a/db-edb` and
+> `rhsi/site-b/db-edb` are the source of truth.
+
 This repository demonstrates how to establish a **Skupper v2** link between a
 **primary** and **standby** OpenShift cluster using:
 
@@ -419,48 +426,47 @@ to manually juggle Skupper tokens on the standby cluster.
 
 ---
 
-## 11. Optional: EDB CloudNativePG two-way replication over Skupper
+## 11. EDB CloudNativePG two-way replication over Skupper (EDB-only path)
 
-In addition to the simple Bitnami primary/standby example, this repo also
-includes a **CloudNativePG / EDB Postgres AI** example using **PostgreSQL 16**
-with **two-way logical replication** between `site-a` and `site-b`, bridged by
-Skupper.
+This repo now includes an **EDB CloudNativePG** example using **PostgreSQL 16**
+with **two-way logical replication** between the primary site (`site-a`) and
+the standby site (`site-b`), bridged by Skupper.
 
 ### 11.1. Prerequisites
 
-- EDB Postgres AI for CloudNativePG operator installed on both clusters
-  (for example via OperatorHub or EDB-provided manifests)
-- Skupper v2 site already configured between `site-a` and `site-b` as per the
-  earlier sections of this README
-- A `db` namespace on both clusters (already created by
-  `rhsi/site-a/db-primary/namespace-db.yaml` and
-  `rhsi/site-b/db-standby/namespace-db.yaml`)
-- PostgreSQL client tools available in the cluster images used by the Jobs
-  (the example uses `ubi9/ubi-minimal` + `microdnf install postgresql`)
+- EDB Postgres AI / CloudNativePG operator installed on both clusters
+  (for example via OperatorHub or EDB-provided manifests). This installs the
+  `postgresql.k8s.enterprisedb.io` CRDs (`Cluster`, `Publication`,
+  `Subscription`, etc.).
+- Skupper v2 sites already configured between `site-a` and `site-b` as per the
+  earlier sections (`rhsi/site-a/site.yaml`, `rhsi/site-b/site.yaml`).
+- A `db` namespace on both clusters:
+  - `rhsi/site-a/db-primary/namespace-db.yaml`
+  - `rhsi/site-b/db-standby/namespace-db.yaml`
 
 ### 11.2. Store the EDB Repos 2 token in Vault
 
-To keep the EDB Repos 2 subscription token out of Git, store it in Vault under
-the existing `rhsi` KV v2 engine:
+Store your **EDB Repos 2** subscription token in Vault under the existing
+`rhsi` KV v2 engine:
 
 ```bash
 export VAULT_ADDR="https://vault-vault.apps.acm.sandbox2745.opentlc.com"
 export VAULT_TOKEN="<your_vault_admin_token>"
 
-vault kv put rhsi/edb-repos2   token="<YOUR_EDB_REPOS2_TOKEN>"
+vault kv put rhsi/edb-repos2 \
+  token="<YOUR_EDB_REPOS2_TOKEN>"
 ```
 
-An example `ExternalSecret` is provided in
-`rhsi/standby/76-externalsecret-edb-repos2-token.yaml` which projects this
-Vault entry into the `rhsi` namespace as a secret called `edb-repos2-token`.
-You can then use that secret as input to a Job or script that creates a
-`docker-registry` imagePullSecret for `docker.enterprisedb.com` as required by
-the EDB operator/images.
+An `ExternalSecret` in `rhsi/standby/76-externalsecret-edb-repos2-token.yaml`
+projects this Vault entry into the `rhsi` namespace as a secret named
+`edb-repos2-token`. You can then use that secret as input for a Job or script
+that creates a `docker-registry` imagePullSecret for `docker.enterprisedb.com`
+(as required by the EDB images).
 
-> **Note:** the actual token value must never be committed to Git. Only the
-> Vault path and secret name appear in this repo.
+> The actual token value must never be committed to Git. Only the Vault path
+> and secret name appear in this repo.
 
-### 11.3. Deploy the EDB clusters on each site
+### 11.3. Deploy the EDB clusters
 
 On **site-a**:
 
@@ -468,10 +474,7 @@ On **site-a**:
 CONTEXT_SITE_A=site-a
 NS_DB=db
 
-# Ensure the db namespace exists (if not already applied):
 oc --context "${CONTEXT_SITE_A}" apply -f rhsi/site-a/db-primary/namespace-db.yaml
-
-# Apply the EDB CloudNativePG manifests:
 oc --context "${CONTEXT_SITE_A}" -n "${NS_DB}" apply -f rhsi/site-a/db-edb/
 ```
 
@@ -485,71 +488,82 @@ oc --context "${CONTEXT_SITE_B}" apply -f rhsi/site-b/db-standby/namespace-db.ya
 oc --context "${CONTEXT_SITE_B}" -n "${NS_DB}" apply -f rhsi/site-b/db-edb/
 ```
 
-This creates:
+These manifests create:
 
-- A single-instance **EDB CloudNativePG cluster** on each site
+- A single-instance **EDB CloudNativePG** cluster on each site
   (`edb-site-a` and `edb-site-b` in namespace `db`)
 - Superuser credentials in `edb-site-a-superuser` and `edb-site-b-superuser`
 - Optional init Jobs that create demo tables `site_a_data` and `site_b_data`
-  on each cluster
 
-> Adjust `storageClass` and passwords in `20-edb-site-*.yaml` to match your
-> environment before applying.
+> Adjust the `storageClass` and passwords in
+> `rhsi/site-a/db-edb/20-edb-site-a-cluster.yaml` and
+> `rhsi/site-b/db-edb/20-edb-site-b-cluster.yaml` before applying.
 
-### 11.4. Skupper wiring for EDB clusters
+If you see errors like:
 
-The manifests under:
+> `no matches for kind "Cluster" in version "postgresql.k8s.enterprisedb.io/v1"`
 
-- `rhsi/site-a/db-edb/60-edb-site-a-connector.yaml`
-- `rhsi/site-a/db-edb/61-edb-site-b-listener.yaml`
-- `rhsi/site-b/db-edb/60-edb-site-b-connector.yaml`
-- `rhsi/site-b/db-edb/61-edb-site-a-listener.yaml`
+that means the **EDB / CloudNativePG operator CRDs are not installed yet**.
+Install the operator first, then re-apply the `db-edb` manifests.
 
-create Skupper **Connectors** and **Listeners** so that:
+### 11.4. Skupper wiring for the EDB clusters
 
-- The **site-a** EDB cluster is reachable from **site-b** as
-  `pg-site-a.rhsi.svc.cluster.local:5432`
-- The **site-b** EDB cluster is reachable from **site-a** as
-  `pg-site-b.rhsi.svc.cluster.local:5432`
+The Skupper **Connector** and **Listener** manifests are under:
 
-These DNS names are referenced in the `externalClusters` section of the EDB
-`Cluster` manifests, enabling CloudNativePG to talk to the remote cluster via
-Skupper.
+- `rhsi/site-a/60-edb-site-a-connector.yaml`
+- `rhsi/site-a/61-edb-site-b-listener.yaml`
+- `rhsi/site-b/60-edb-site-b-connector.yaml`
+- `rhsi/site-b/61-edb-site-a-listener.yaml`
 
-### 11.5. Two-way logical replication (Publication + Subscription)
+These create:
 
-The following manifests configure two-way logical replication using the
-EDB/CloudNativePG `Publication` and `Subscription` CRDs:
+- A Connector on `site-a` that exposes the `edb-site-a` cluster to the Skupper
+  network with routing key `edb-site-a`, selecting pods with
+  `cnpg.io/cluster=edb-site-a` in namespace `db`.
+- A Listener on `site-b` that makes `edb-site-a` reachable as
+  `edb-site-a.rhsi.svc.cluster.local:5432`.
+- Similarly in the other direction for `edb-site-b`.
 
-- On **site-a**:
-  - `rhsi/site-a/db-edb/40-edb-site-a-publication.yaml`
-  - `rhsi/site-a/db-edb/50-edb-site-a-subscription-from-b.yaml`
+The `externalClusters` section in the EDB `Cluster` CRs uses these hostnames:
 
-- On **site-b**:
-  - `rhsi/site-b/db-edb/40-edb-site-b-publication.yaml`
-  - `rhsi/site-b/db-edb/50-edb-site-b-subscription-from-a.yaml`
+- On `site-a` (`edb-site-a`), the remote `site-b` cluster is reached at
+  `edb-site-b.rhsi.svc.cluster.local`.
+- On `site-b` (`edb-site-b`), the remote `site-a` cluster is reached at
+  `edb-site-a.rhsi.svc.cluster.local`.
+
+### 11.5. Two-way logical replication
+
+Two-way logical replication is configured via the `Publication` and
+`Subscription` resources:
+
+- `rhsi/site-a/db-edb/40-edb-site-a-publication.yaml`
+- `rhsi/site-a/db-edb/50-edb-site-a-subscription-from-b.yaml`
+- `rhsi/site-b/db-edb/40-edb-site-b-publication.yaml`
+- `rhsi/site-b/db-edb/50-edb-site-b-subscription-from-a.yaml`
 
 Each site:
 
-- Publishes changes from its local `postgres` database (`site_a_pub` /
-  `site_b_pub`)
-- Subscribes to the other site's publication via the configured
-  `externalClusters` entry (`site-a` / `site-b`)
+- Publishes changes from its local `postgres` database
+  (`site_a_pub` on `edb-site-a`, `site_b_pub` on `edb-site-b`)
+- Subscribes to the other site's publication using the `externalClusters`
+  entries (`site-a` and `site-b`)
 
 This yields **two-way logical replication** between the two EDB clusters over
-the existing Skupper link.
+the Skupper link.
 
-> For a production deployment you will normally:
-> - Restrict publications to specific tables or schemas instead of `allTables`
-> - Consider conflict-avoidance strategies (for example, each site owning a
->   different subset of tables or keys), or move to EDB Postgres Distributed
->   if you require full multi-master with conflict resolution.
+For a real deployment you will usually:
+
+- Restrict publications to specific tables/schemas instead of `allTables`
+- Avoid write conflicts by ensuring that each site owns different tables or
+  key ranges, or move to **EDB Postgres Distributed** if you need full
+  multi-master with conflict resolution.
 
 ### 11.6. Smoke test
 
-Once everything is up and the `Publication` / `Subscription` resources are in
-`Ready` state, you can verify replication by inserting rows on one site and
-reading them from the other, for example:
+Once the clusters, Skupper resources, and `Publication` / `Subscription`
+objects are all in `Ready` state, you can test replication.
+
+Example: write on **site-a**, read on **site-b**:
 
 ```bash
 # Insert on site-a
@@ -559,8 +573,15 @@ oc --context "${CONTEXT_SITE_A}" -n db exec -it deploy/edb-site-a-rw --   bash -
 oc --context "${CONTEXT_SITE_B}" -n db exec -it deploy/edb-site-b-rw --   bash -c 'psql -U postgres -d postgres -c "SELECT * FROM site_a_data ORDER BY id DESC LIMIT 5;"'
 ```
 
-And vice versa for the `site_b_data` table.
+And the reverse for `site_b_data`:
 
-This EDB example is intentionally minimal and is meant as a starting point for
-more advanced designs (additional replicas, backup/restore, connection pooling,
-or EDB Postgres Distributed for true multi-master).
+```bash
+# Insert on site-b
+oc --context "${CONTEXT_SITE_B}" -n db exec -it deploy/edb-site-b-rw --   bash -c 'psql -U postgres -d postgres -c "INSERT INTO site_b_data (payload) VALUES (''from-site-b'');"'
+
+# Read from site-a
+oc --context "${CONTEXT_SITE_A}" -n db exec -it deploy/edb-site-a-rw --   bash -c 'psql -U postgres -d postgres -c "SELECT * FROM site_b_data ORDER BY id DESC LIMIT 5;"'
+```
+
+If you see rows flowing in both directions, your EDB two-way replication over
+Skupper is working.

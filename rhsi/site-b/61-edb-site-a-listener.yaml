@@ -5,6 +5,6 @@ metadata:
   namespace: rhsi
 spec:
   routingKey: edb-site-a
-  host: pg-site-a
+  host: edb-site-a
   port: 5432
 

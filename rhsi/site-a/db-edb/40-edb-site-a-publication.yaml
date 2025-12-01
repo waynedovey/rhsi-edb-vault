@@ -9,7 +9,6 @@ spec:
   dbname: postgres
   name: site_a_pub
   target:
-    # For a real deployment, restrict to a specific table or schema
     allTables: true
   publicationReclaimPolicy: delete
 

@@ -18,7 +18,6 @@ spec:
       database: postgres
       owner: postgres
 
-  # Minimal storage spec - adjust for your environment
   storage:
     size: 20Gi
     storageClass: REPLACE_WITH_STORAGE_CLASS
@@ -29,11 +28,10 @@ spec:
       max_replication_slots: "10"
       max_wal_senders: "10"
 
-  # External reference to the remote site-b cluster, reached via Skupper
   externalClusters:
     - name: site-b
       connectionParameters:
-        host: pg-site-b.rhsi.svc.cluster.local
+        host: edb-site-b.rhsi.svc.cluster.local
         user: postgres
         dbname: postgres
       password:
