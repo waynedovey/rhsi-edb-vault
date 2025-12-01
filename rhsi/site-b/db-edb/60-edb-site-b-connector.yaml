@@ -1,0 +1,11 @@
+apiVersion: skupper.io/v2alpha1
+kind: Connector
+metadata:
+  name: edb-site-b
+  namespace: rhsi
+spec:
+  routingKey: edb-site-b
+  selector: cnpg.io/cluster=edb-site-b
+  port: 5432
+  namespace: db
+

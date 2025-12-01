@@ -1,0 +1,15 @@
+apiVersion: postgresql.k8s.enterprisedb.io/v1
+kind: Publication
+metadata:
+  name: site-a-publication
+  namespace: db
+spec:
+  cluster:
+    name: edb-site-a
+  dbname: postgres
+  name: site_a_pub
+  target:
+    # For a real deployment, restrict to a specific table or schema
+    allTables: true
+  publicationReclaimPolicy: delete
+

@@ -1,0 +1,10 @@
+apiVersion: skupper.io/v2alpha1
+kind: Listener
+metadata:
+  name: edb-site-a
+  namespace: rhsi
+spec:
+  routingKey: edb-site-a
+  host: pg-site-a
+  port: 5432
+

@@ -1,0 +1,14 @@
+apiVersion: postgresql.k8s.enterprisedb.io/v1
+kind: Subscription
+metadata:
+  name: site-a-to-site-b-sub
+  namespace: db
+spec:
+  cluster:
+    name: edb-site-b
+  dbname: postgres
+  name: site_a_sub
+  externalClusterName: site-a
+  publicationName: site_a_pub
+  subscriptionReclaimPolicy: delete
+
