@@ -340,23 +340,42 @@ You should see `STATUS: Ready` and `MESSAGE: OK`.
 
 ---
 
-## 10. End-to-end Postgres test
+## 10. End-to-end EDB connectivity test over Skupper
 
-Finally, confirm that the standby site can reach the Postgres primary over
-the Skupper link.
+Finally, confirm that the standby site (`site-b`) can reach the EDB primary
+(`edb-site-a`) over the Skupper link.
 
-From `site-b`:
+From `site-b`, first obtain the EDB superuser password (for example, from
+the `edb-site-b-superuser` secret):
 
 ```bash
-oc --context "${CONTEXT_SITE_B}" -n "${NS_RHSI}" exec -it deploy/postgres-standby -- bash
+oc --context "${CONTEXT_SITE_B}" -n db \
+  get secret edb-site-b-superuser \
+  -o jsonpath='{.data.password}' | base64 -d
+
+# Copy the value and export it into your shell:
+export PGPASSWORD='<copied password>'
+```
+
+Then launch a one-shot client pod on `site-b` in the `db` namespace:
+
+```bash
+oc --context "${CONTEXT_SITE_B}" -n db run edb-skupper-test \
+  --image=registry.access.redhat.com/ubi9/ubi-minimal:latest \
+  -it --rm --restart=Never -- \
+  bash
 ```
 
 Inside the pod:
 
 ```bash
-export PGPASSWORD='supersecret'
+microdnf install -y postgresql
 
-psql   -h postgres-primary   -p 5432   -U appuser   -d postgres << 'SQL'
+psql \
+  -h edb-site-a.rhsi.svc.cluster.local \
+  -p 5432 \
+  -U postgres \
+  -d postgres << 'SQL'
 CREATE TABLE IF NOT EXISTS skupper_test (
   id         serial PRIMARY KEY,
   site       text,
@@ -384,9 +403,9 @@ INSERT 0 1
 ```
 
 At this point the Skupper link is operational and traffic from `site-b`
-to `postgres-primary` is flowing over the Skupper network.
+to the EDB cluster on `site-a` (`edb-site-a`) is flowing over the
+Skupper network.
 
----
 
 ## 11. Rotating the link credentials
 
