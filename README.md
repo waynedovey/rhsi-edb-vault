@@ -14,7 +14,7 @@ This repository demonstrates how to establish a **Skupper v2** link between a
 - A one‑shot **Job** on `site-b` that turns the Vault secret into a Skupper
   **AccessToken**, which the Skupper controller then redeems to create the link
 
-The worked example uses a simple **PostgreSQL primary / standby** pair connected
+The worked example uses a simple **EDB CloudNativePG Postgres pair** connected
 via Skupper.
 
 ---
@@ -338,6 +338,127 @@ You should see `STATUS: Ready` and `MESSAGE: OK`.
 
 ---
 
+
+
+---
+
+## 10. Installing the EDB Postgres AI for CloudNativePG operator
+
+The EDB examples in this repo rely on the **EDB Postgres AI for CloudNativePG**
+operator (package `cloud-native-postgresql`) being installed on your OpenShift
+clusters via OperatorHub.
+
+At a high level you must:
+
+1. Store your **EDB Repos** token in Vault (the token "lives" in Vault).
+2. Use External Secrets Operator (ESO) to sync that token into the cluster.
+3. Use a Job to create/update the `docker-registry` pull secret for the operator
+   in `openshift-operators`, derived from the Vault-managed token.
+4. Create the `Subscription` for the operator.
+
+### 10.1. Store the EDB token in Vault (source of truth)
+
+Use your real **EDB Repos** token (not committed to Git) and store it in the
+`rhsi` KV v2 engine:
+
+```bash
+export VAULT_ADDR="https://vault-vault.apps.acm.sandbox2745.opentlc.com"
+export VAULT_TOKEN="<your_vault_admin_token>"
+
+vault kv put rhsi/edb-repos2 \
+  token="<YOUR_EDB_REPOS_TOKEN>"
+```
+
+This makes Vault the **source of truth** for the EDB token.
+
+### 10.2. Sync the token into the cluster with ESO
+
+The file:
+
+- `rhsi/standby/76-externalsecret-edb-repos2-token.yaml`
+
+defines an `ExternalSecret` that reads the `token` field from the Vault path
+`rhsi/edb-repos2` (via the `vault-rhsi` `SecretStore`) and writes it into the
+`rhsi` namespace as:
+
+- `Secret` **`edb-repos2-token`**, key `token`
+
+Apply it on the cluster where you are managing the link and operator:
+
+```bash
+oc apply -f rhsi/standby/76-externalsecret-edb-repos2-token.yaml
+```
+
+Wait until the `edb-repos2-token` secret exists:
+
+```bash
+oc -n rhsi get secret edb-repos2-token
+```
+
+### 10.3. Create/update the operator pull secret from the Vault-managed token
+
+Instead of manually running `oc create secret docker-registry ...` with the
+token on your command line, this repo provides:
+
+- `rhsi/standby/07-rbac-edb-operator-pullsecret.yaml`
+- `rhsi/standby/81-job-create-edb-operator-pullsecret.yaml`
+
+The RBAC file grants the `rhsi-vault-reader` ServiceAccount permission to
+manage **only** the `postgresql-operator-pull-secret` secret in the
+`openshift-operators` namespace.
+
+Apply the RBAC and Job:
+
+```bash
+oc apply -f rhsi/standby/07-rbac-edb-operator-pullsecret.yaml
+oc apply -f rhsi/standby/81-job-create-edb-operator-pullsecret.yaml
+```
+
+The Job will:
+
+1. Wait for the `edb-repos2-token` secret in `rhsi`.
+2. Read the `token` value from that secret (which came from Vault).
+3. Create or update a `docker-registry` type Secret named
+   **`postgresql-operator-pull-secret`** in the `openshift-operators`
+   namespace, with:
+
+   - `--docker-server=docker.enterprisedb.com`
+   - `--docker-username=k8s`
+   - `--docker-password=<token from Vault>`
+
+You can re-run the Job any time the token in Vault is rotated; the secret will
+be re-created/updated accordingly.
+
+### 10.4. Subscribe to the operator from OperatorHub (CLI)
+
+This repo contains a minimal `Subscription` manifest under:
+
+- `rhsi/edb-operator/10-subscription-cloud-native-postgresql.yaml`
+
+It targets the `cloud-native-postgresql` package from the `certified-operators`
+catalog in `openshift-marketplace` on the `fast` channel.
+
+Apply it once on the cluster:
+
+```bash
+oc apply -f rhsi/edb-operator/10-subscription-cloud-native-postgresql.yaml
+```
+
+For a **cluster-wide** install (recommended), leave it in the `openshift-operators`
+namespace so all projects (including `db` and `rhsi`) can create EDB
+`Cluster`, `Publication` and `Subscription` resources.
+
+You can verify the operator is up and the CRDs are present with:
+
+```bash
+oc get csv -n openshift-operators | grep cloud-native-postgresql
+oc get crd | grep postgresql.k8s.enterprisedb.io
+```
+
+Once these are ready, the EDB manifests under `rhsi/site-a/db-edb` and
+`rhsi/site-b/db-edb` can be applied as described in the later sections.
+
+
 ## 11. Rotating the link credentials
 
 When you want to rotate the Skupper link credentials:
@@ -376,13 +497,13 @@ to manually juggle Skupper tokens on the standby cluster.
 
 ---
 
-## 11. EDB CloudNativePG two-way replication over Skupper (EDB-only path)
+## 12. EDB CloudNativePG two-way replication over Skupper (EDB-only path)
 
 This repo now includes an **EDB CloudNativePG** example using **PostgreSQL 16**
 with **two-way logical replication** between the primary site (`site-a`) and
 the standby site (`site-b`), bridged by Skupper.
 
-### 11.1. Prerequisites
+### 12.1. Prerequisites
 
 - EDB Postgres AI / CloudNativePG operator installed on both clusters
   (for example via OperatorHub or EDB-provided manifests). This installs the
@@ -394,7 +515,7 @@ the standby site (`site-b`), bridged by Skupper.
   - `rhsi/site-a/db-primary/namespace-db.yaml`
   - `rhsi/site-b/db-standby/namespace-db.yaml`
 
-### 11.2. Store the EDB Repos 2 token in Vault
+### 12.2. Store the EDB Repos 2 token in Vault
 
 Store your **EDB Repos 2** subscription token in Vault under the existing
 `rhsi` KV v2 engine:
@@ -416,7 +537,7 @@ that creates a `docker-registry` imagePullSecret for `docker.enterprisedb.com`
 > The actual token value must never be committed to Git. Only the Vault path
 > and secret name appear in this repo.
 
-### 11.3. Deploy the EDB clusters
+### 12.3. Deploy the EDB clusters
 
 On **site-a**:
 
@@ -456,7 +577,7 @@ If you see errors like:
 that means the **EDB / CloudNativePG operator CRDs are not installed yet**.
 Install the operator first, then re-apply the `db-edb` manifests.
 
-### 11.4. Skupper wiring for the EDB clusters
+### 12.4. Skupper wiring for the EDB clusters
 
 The Skupper **Connector** and **Listener** manifests are under:
 
@@ -481,7 +602,7 @@ The `externalClusters` section in the EDB `Cluster` CRs uses these hostnames:
 - On `site-b` (`edb-site-b`), the remote `site-a` cluster is reached at
   `edb-site-a.rhsi.svc.cluster.local`.
 
-### 11.5. Two-way logical replication
+### 12.5. Two-way logical replication
 
 Two-way logical replication is configured via the `Publication` and
 `Subscription` resources:
@@ -508,7 +629,7 @@ For a real deployment you will usually:
   key ranges, or move to **EDB Postgres Distributed** if you need full
   multi-master with conflict resolution.
 
-### 11.6. Smoke test
+### 12.6. Smoke test
 
 Once the clusters, Skupper resources, and `Publication` / `Subscription`
 objects are all in `Ready` state, you can test replication.
