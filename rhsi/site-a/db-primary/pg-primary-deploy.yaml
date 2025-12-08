@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pg-primary
+  namespace: db
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pg-primary
+  template:
+    metadata:
+      labels:
+        app: pg-primary
+    spec:
+      containers:
+        - name: postgres
+          image: bitnami/postgresql-repmgr:15
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRESQL_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pg-primary-auth
+                  key: postgres-password
+            - name: REPMGR_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pg-primary-auth
+                  key: repmgr-password
+            - name: REPMGR_PRIMARY_HOST
+              value: pg-primary.db.svc.cluster.local
+            - name: REPMGR_NODE_NAME
+              value: pg-primary
+            - name: REPMGR_NODE_NETWORK_NAME
+              value: pg-primary.db.svc.cluster.local
+            - name: REPMGR_PARTNER_NODES
+              value: pg-primary.db.svc.cluster.local
+          ports:
+            - containerPort: 5432
+              name: postgres
+          volumeMounts:
+            - name: data
+              mountPath: /bitnami/postgresql
+      volumes:
+        - name: data
+          emptyDir: {}

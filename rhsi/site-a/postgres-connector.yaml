@@ -1,0 +1,10 @@
+apiVersion: skupper.io/v2alpha1
+kind: Connector
+metadata:
+  name: pg-primary
+  namespace: rhsi
+spec:
+  routingKey: pg-primary
+  selector: app=pg-primary
+  port: 5432
+  namespace: db
